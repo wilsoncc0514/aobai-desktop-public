@@ -1,0 +1,81 @@
+:root {
+  color: #2b211b;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --panel: rgba(255, 250, 242, 0.96);
+  --panel-border: rgba(83, 59, 44, 0.22);
+  --accent: #8a5a3a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.pet-stage {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: flex-end;
+  justify-content: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pet-image {
+  width: 208px;
+  height: 208px;
+  cursor: grab;
+  image-rendering: auto;
+  touch-action: none;
+}
+
+.pet-image:active {
+  cursor: grabbing;
+}
+
+.speech-bubble {
+  position: absolute;
+  z-index: 4;
+  top: 6px;
+  left: 50%;
+  min-width: 108px;
+  max-width: 210px;
+  transform: translateX(-50%);
+  padding: 7px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 5px 16px rgba(49, 31, 20, 0.16);
+  font-size: 12px;
+  text-align: center;
+}
+
+.mode-indicator {
+  position: absolute;
+  right: 9px;
+  bottom: 7px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: rgba(52, 37, 29, 0.68);
+  background: rgba(255, 250, 242, 0.72);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-image {
+    transition: none;
+  }
+}

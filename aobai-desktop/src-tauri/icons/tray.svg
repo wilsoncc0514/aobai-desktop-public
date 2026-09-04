@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36">
+  <!-- Monochrome alpha mask for the macOS menu bar template icon. -->
+  <path fill="#000" d="M5 14V4l8 5a18 18 0 0 1 10 0l8-5v10c2 3 3 7 2 11-2 6-7 9-15 9S5 31 3 25c-1-4 0-8 2-11Z"/>
+  <ellipse cx="12" cy="20" rx="2" ry="2.6" fill="#fff"/>
+  <ellipse cx="24" cy="20" rx="2" ry="2.6" fill="#fff"/>
+  <path d="m16 25 2 2 2-2Z" fill="#fff"/>
+  <path d="M8 25H2m7 3-6 2m25-5h6m-7 3 6 2" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,31 @@
+{
+  "name": "aobai-desktop",
+  "private": true,
+  "version": "0.4.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "bundle": "sh scripts/build-release.sh",
+    "bundle:candidate": "sh scripts/build-release.sh --candidate",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "tauri": "tauri",
+    "check:rust": "sh scripts/check-rust.sh",
+    "check": "npm run test && npm run build && npm run check:rust"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.0",
+    "@tauri-apps/plugin-autostart": "^2.5.0",
+    "vue": "^3.5.32"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.0",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "@vue/tsconfig": "^0.7.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.2",
+    "vitest": "^3.2.4",
+    "vue-tsc": "^2.2.12"
+  }
+}

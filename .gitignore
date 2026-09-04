@@ -1,0 +1,12 @@
+.DS_Store
+node_modules/
+dist/
+target/
+gen/
+release/
+*.log
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
