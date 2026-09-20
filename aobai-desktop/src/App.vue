@@ -110,6 +110,7 @@ function scheduleAmbientAction(): void {
         settings.value.mode,
         Math.random(),
         previousAmbientState,
+        motions.value.idle ? Object.keys(motions.value) : undefined,
       );
       previousAmbientState = state;
       play(state);

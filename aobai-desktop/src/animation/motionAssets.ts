@@ -49,6 +49,18 @@ export function validateMotionManifest(value: unknown): MotionManifest {
       throw new Error(`无效动作循环：${name}`);
     }
     total += clip.durations.length;
+    if (clip.repeat !== undefined) {
+      const repeat = clip.repeat;
+      if (!Array.isArray(repeat) || repeat.length !== 3 || !repeat.every(Number.isInteger) ||
+          repeat[0] < 1 || repeat[1] < repeat[0] || repeat[1] >= clip.durations.length - 1 ||
+          repeat[2] < 2 || repeat[2] > 32 || clip.loop || clip.heldLoop !== undefined) {
+        throw new Error(`无效主体重复：${name}`);
+      }
+      const duration = clip.durations.reduce((sum: number, n: number) => sum + n, 0) +
+        clip.durations.slice(repeat[0], repeat[1] + 1)
+          .reduce((sum: number, n: number) => sum + n, 0) * (repeat[2] - 1);
+      if (duration > 120_000) throw new Error(`动作重复超过时长预算：${name}`);
+    }
   }
   if (total > MAX_TOTAL_FRAMES) throw new Error("动作资源超过总帧预算");
   return value as unknown as MotionManifest;

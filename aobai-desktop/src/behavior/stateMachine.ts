@@ -39,9 +39,18 @@ export function selectAmbientAction(
   mode: ActivityMode,
   sample: number,
   previousState: PetState | null = null,
+  availableActions?: readonly string[],
 ): PetState {
   if (mode === "quiet") return "idle";
-  const actions = mode === "active" ? ACTIVE_ACTIONS : NORMAL_ACTIONS;
+  const weighted = mode === "active" ? ACTIVE_ACTIONS : NORMAL_ACTIONS;
+  // A new motion pack must not randomly fall through to differently scaled
+  // legacy artwork. Omitted availability preserves external v2 behavior.
+  const actions = availableActions === undefined
+    ? weighted
+    : weighted.filter((action) => availableActions.includes(action.state))
+      // Only the bundled pack maps "running" to kneading; legacy skins keep
+      // their existing weights and semantics.
+      .map((action) => action.state === "running" ? { ...action, weight: action.weight / 3 } : action);
   const alternatives = actions.filter((action) => action.state !== previousState);
   return pickWeighted(alternatives.length > 0 ? alternatives : actions, sample);
 }

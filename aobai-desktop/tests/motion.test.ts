@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MotionPlayer, type MotionLibrary } from "../src/animation/motion";
 import { loadBuiltinMotions, validateMotionManifest } from "../src/animation/motionAssets";
+import manifest from "../public/builtin/aobai/motion/manifest.json";
 
 const library: MotionLibrary = {
   idle: { durations: [100, 200], loop: true },
@@ -9,6 +10,39 @@ const library: MotionLibrary = {
 };
 
 describe("single-owner motion controller", () => {
+  it.each([["waving", 8970], ["running", 12420]] as const)(
+    "bundled %s lasts exactly three times its previous duration", (action, expected) => {
+      const player = new MotionPlayer(validateMotionManifest(manifest).clips);
+      player.request(action);
+      let elapsed = 0;
+      for (let i = 0; player.snapshot.action !== "idle" && i < 500; i++) {
+        elapsed += player.snapshot.duration; player.advance();
+      }
+      expect(player.snapshot.action).toBe("idle");
+      expect(elapsed).toBeCloseTo(expected, 6);
+    });
+  it("repeats only the body, then plays recovery once", () => {
+    const player = new MotionPlayer({ ...library, waving: {
+      durations: [100, 200, 300, 100], repeat: [1, 2, 3],
+    } });
+    player.request("waving");
+    const seen = [];
+    while (player.snapshot.action !== "idle" && seen.length < 20) {
+      seen.push(player.snapshot.frame); player.advance();
+    }
+    expect(seen).toEqual([0, 1, 2, 1, 2, 1, 2, 3]);
+  });
+  it("petting skips remaining body repeats and reset clears repeat progress", () => {
+    const player = new MotionPlayer({ ...library, waving: {
+      durations: [100, 200, 300, 100], repeat: [1, 2, 3],
+    } });
+    player.request("waving"); player.advance(); player.press();
+    for (let i = 0; i < 3; i++) player.advance();
+    expect(player.snapshot.action).toBe("belly");
+    player.reset(); player.request("waving");
+    for (let i = 0; i < 7; i++) player.advance();
+    expect(player.snapshot).toMatchObject({ action: "waving", frame: 3 });
+  });
   it("plays entry, holds belly without directional running, then finishes recovery", () => {
     const player = new MotionPlayer(library);
     player.press();
@@ -99,6 +133,18 @@ describe("optional built-in clip decoding", () => {
 });
 
 describe("bounded variable-frame motion assets", () => {
+  it.each([[0, 2, 3], [2, 1, 3], [1, 3, 3], [1, 2, 0], [1, 2, 33],
+    [1, 2, 2.5], [1, 2], [1, 2, Number.NaN]])("rejects invalid body repeat %j", (...repeat) => {
+    expect(() => validateMotionManifest({ version: 1, size: 208, clips: { waving: {
+      file: "groom.webp", columns: 4, durations: [100, 100, 100, 100], repeat,
+    } } })).toThrow();
+  });
+  it("rejects conflicting loops and excessive repeated duration", () => {
+    const clip = { file: "groom.webp", columns: 4, durations: [10000, 10000, 10000, 10000], repeat: [1, 2, 32] };
+    for (const extra of [{}, { loop: true }, { heldLoop: [1, 2] }]) {
+      expect(() => validateMotionManifest({ version: 1, size: 208, clips: { waving: { ...clip, ...extra } } })).toThrow();
+    }
+  });
   const valid = { version: 1, size: 208, clips: { belly: {
     file: "belly.webp", file2x: "belly@2x.webp", columns: 4,
     durations: Array(13).fill(120), heldLoop: [4, 8],

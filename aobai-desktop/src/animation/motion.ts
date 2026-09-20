@@ -5,6 +5,8 @@ export interface MotionClip {
   readonly durations: readonly number[];
   readonly loop?: boolean;
   readonly heldLoop?: readonly [number, number];
+  /** Inclusive body range and total passes; entry/recovery play once. */
+  readonly repeat?: readonly [number, number, number];
 }
 export type MotionLibrary = Partial<Record<MotionAction, MotionClip>>;
 
@@ -21,6 +23,7 @@ export class MotionPlayer {
   private frame = 0;
   private pending: MotionAction | null = null;
   private held = false;
+  private bodyPass = 1;
 
   constructor(private readonly clips: MotionLibrary) {
     if (!clips.idle?.durations.length) throw new Error("Missing idle motion");
@@ -69,6 +72,10 @@ export class MotionPlayer {
     const clip = this.clips[this.action]!;
     if (this.held && clip.heldLoop && this.frame === clip.heldLoop[1]) {
       this.frame = clip.heldLoop[0];
+    } else if (clip.repeat && this.pending === null &&
+        this.frame === clip.repeat[1] && this.bodyPass < clip.repeat[2]) {
+      this.bodyPass++;
+      this.frame = clip.repeat[0];
     } else if (this.frame + 1 < clip.durations.length) {
       this.frame++;
     } else {
@@ -81,5 +88,6 @@ export class MotionPlayer {
   private start(action: MotionAction): void {
     this.action = action;
     this.frame = 0;
+    this.bodyPass = 1;
   }
 }
