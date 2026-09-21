@@ -7,6 +7,9 @@ const library: MotionLibrary = {
   idle: { durations: [100, 200], loop: true },
   belly: { durations: [100, 100, 100, 100, 100, 100], heldLoop: [2, 3] },
   waving: { durations: [100, 500, 100] },
+  sleep: { durations: [900, 900], loop: true },
+  "sleep-enter": { durations: [100, 100] },
+  "sleep-exit": { durations: [100, 100] },
 };
 
 describe("single-owner motion controller", () => {
@@ -92,6 +95,25 @@ describe("single-owner motion controller", () => {
     player.press();
     expect(player.snapshot.action).toBe("waiting");
   });
+  it("loops sleep until an interaction queues the existing belly flow", () => {
+    const player = new MotionPlayer(library);
+    player.request("sleep");
+    player.advance(); player.advance(); player.advance();
+    expect(player.snapshot.action).toBe("sleep");
+    player.press();
+    player.advance();
+    expect(player.snapshot.action).toBe("belly");
+  });
+  it("replaces a bounded transition immediately and clears queued intent", () => {
+    const player = new MotionPlayer(library);
+    player.request("waving"); player.press();
+    expect(player.replace("sleep-enter")).toBe(true);
+    expect(player.snapshot).toMatchObject({ action: "sleep-enter", frame: 0 });
+    expect(player.isHeld).toBe(false);
+    player.advance(); player.advance();
+    expect(player.snapshot.action).toBe("idle");
+    expect(player.replace("review")).toBe(false);
+  });
 });
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
@@ -133,6 +155,30 @@ describe("optional built-in clip decoding", () => {
 });
 
 describe("bounded variable-frame motion assets", () => {
+  it("uses a deliberate 620ms idle blink window with a short closed-eye hold", () => {
+    const idle = validateMotionManifest(manifest).clips.idle;
+    expect(idle?.durations.slice(8, 11)).toEqual([180, 260, 180]);
+    expect(idle?.durations.slice(8, 11).reduce((sum, duration) => sum + duration, 0)).toBe(620);
+    expect(idle?.durations[0]).toBe(5_000);
+    expect(idle?.durations[11]).toBe(3_000);
+    expect(idle?.durations.reduce((sum, duration) => sum + duration, 0)).toBe(9_560);
+  });
+
+  it("registers the built-in sleep breathing loop without held or repeated bodies", () => {
+    const sleep = validateMotionManifest(manifest).clips.sleep;
+    expect(sleep).toMatchObject({ columns: 4, loop: true });
+    expect(sleep?.durations).toHaveLength(12);
+    expect(sleep?.heldLoop).toBeUndefined();
+    expect(sleep?.repeat).toBeUndefined();
+  });
+  it.each(["sleep-enter", "sleep-exit"] as const)("registers bounded %s transition", (action) => {
+    const clip = validateMotionManifest(manifest).clips[action];
+    expect(clip).toMatchObject({ columns: 4 });
+    expect(clip?.durations).toHaveLength(8);
+    expect(clip?.loop).toBeUndefined();
+    expect(clip?.heldLoop).toBeUndefined();
+    expect(clip?.repeat).toBeUndefined();
+  });
   it.each([[0, 2, 3], [2, 1, 3], [1, 3, 3], [1, 2, 0], [1, 2, 33],
     [1, 2, 2.5], [1, 2], [1, 2, Number.NaN]])("rejects invalid body repeat %j", (...repeat) => {
     expect(() => validateMotionManifest({ version: 1, size: 208, clips: { waving: {

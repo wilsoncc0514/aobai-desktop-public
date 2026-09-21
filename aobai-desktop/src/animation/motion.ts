@@ -1,6 +1,6 @@
 import { ANIMATIONS, type PetState } from "./catalog";
 
-export type MotionAction = PetState | "belly";
+export type MotionAction = PetState | "belly" | "sleep" | "sleep-enter" | "sleep-exit";
 export interface MotionClip {
   readonly durations: readonly number[];
   readonly loop?: boolean;
@@ -66,6 +66,15 @@ export class MotionPlayer {
     this.held = false;
     this.pending = null;
     this.start("idle");
+  }
+
+  /** Immediately hands frame ownership to a known clip (used by bounded transitions). */
+  replace(action: MotionAction): boolean {
+    if (!this.clips[action]) return false;
+    this.held = false;
+    this.pending = null;
+    this.start(action);
+    return true;
   }
 
   advance(): void {

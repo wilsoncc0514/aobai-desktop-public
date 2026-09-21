@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watchEffect } from "vue";
-import { ANIMATIONS, type PetState } from "./animation/catalog";
+import { ANIMATIONS, isPetState, type PetState } from "./animation/catalog";
 import {
   configureCanvasForDisplay,
   ATLAS_WIDTH,
@@ -10,6 +10,15 @@ import {
 import { legacyMotionLibrary, MotionPlayer, type MotionAction } from "./animation/motion";
 import { drawMotionFrame, loadBuiltinMotions, type LoadedMotions } from "./animation/motionAssets";
 import motionManifest from "../public/builtin/aobai/motion/manifest.json";
+import {
+  availableBehaviorActionsForMotions,
+  behaviorActionToMotionAction,
+  motionActionToBehaviorAction,
+  type BehaviorAction,
+} from "./behavior/actions";
+import { appendRecentAction, type PetContext } from "./behavior/context";
+import { RuleDecisionProvider } from "./behavior/ruleDecisionProvider";
+import { SleepSession } from "./behavior/sleepSession";
 import {
   nextAmbientDelayMs,
   selectAmbientAction,
@@ -75,6 +84,12 @@ let pendingDragPosition: Point | null = null;
 let dragMoveInFlight = false;
 let lastFrameAt = 0;
 let previousAmbientState: PetState | null = null;
+let previousBehaviorAction: BehaviorAction | null = null;
+let recentBehaviorActions: readonly BehaviorAction[] = [];
+let lastAmbientActionAt = Date.now();
+let lastUserInteractionAt = Date.now();
+const decisionProvider = new RuleDecisionProvider();
+const sleepSession = new SleepSession();
 const cleanups: Array<() => void> = [];
 
 const modeLabel = computed(() => ({ quiet: "安静", normal: "普通", active: "活跃" })[settings.value.mode]);
@@ -96,6 +111,13 @@ function play(state: MotionAction): void {
   lastFrameAt = performance.now();
 }
 
+function cancelSleepSession(): void {
+  if (!sleepSession.cancel()) return;
+  player.reset();
+  syncMotion();
+  lastFrameAt = performance.now();
+}
+
 function scheduleAmbientAction(): void {
   if (ambientTimer !== undefined) window.clearTimeout(ambientTimer);
   const delay = nextAmbientDelayMs(settings.value.mode, Math.random());
@@ -106,14 +128,44 @@ function scheduleAmbientAction(): void {
       currentState.value === "idle" &&
       !player.isHeld
     ) {
-      const state = selectAmbientAction(
-        settings.value.mode,
-        Math.random(),
-        previousAmbientState,
-        motions.value.idle ? Object.keys(motions.value) : undefined,
-      );
-      previousAmbientState = state;
-      play(state);
+      const availableMotions = motions.value.idle ? Object.keys(motions.value) : null;
+      if (availableMotions === null) {
+        const state = selectAmbientAction(
+          settings.value.mode,
+          Math.random(),
+          previousAmbientState,
+        );
+        previousAmbientState = state;
+        play(state);
+      } else {
+        const now = Date.now();
+        const availableActions = availableBehaviorActionsForMotions(availableMotions);
+        const context: PetContext = {
+          mode: settings.value.mode,
+          currentAction: motionActionToBehaviorAction(currentState.value) ?? "idle",
+          previousAction: previousBehaviorAction,
+          recentActions: recentBehaviorActions,
+          secondsSinceLastAmbientAction: Math.max(0, (now - lastAmbientActionAt) / 1_000),
+          secondsSinceUserInteraction: Math.max(0, (now - lastUserInteractionAt) / 1_000),
+          hour: new Date(now).getHours(),
+        };
+        const behaviorAction = decisionProvider.decide(
+          context,
+          availableActions,
+          Math.random(),
+        );
+        previousBehaviorAction = behaviorAction;
+        recentBehaviorActions = appendRecentAction(recentBehaviorActions, behaviorAction);
+        lastAmbientActionAt = now;
+        if (behaviorAction === "sleep") {
+          const withTransitions = Boolean(motions.value["sleep-enter"] && motions.value["sleep-exit"]);
+          sleepSession.start(Math.random(), withTransitions);
+          play(withTransitions ? "sleep-enter" : "sleep");
+        } else {
+          sleepSession.cancel();
+          play(behaviorActionToMotionAction(behaviorAction));
+        }
+      }
     }
     scheduleAmbientAction();
   }, delay);
@@ -127,12 +179,17 @@ function startAnimationClock(): void {
     const frameDuration = player.snapshot.duration;
     if (now - lastFrameAt < frameDuration) return;
     lastFrameAt = now;
+    const before = player.snapshot;
     player.advance();
+    const command = sleepSession.observeAdvance(before, player.snapshot);
+    if (command === "sleep" || command === "sleep-exit") player.replace(command);
+    else if (command === "complete") player.reset();
     syncMotion();
   }, 32);
 }
 
 async function activateSkin(id: string, persist = true): Promise<void> {
+  cancelSleepSession();
   const skin = skins.value.find((candidate) => candidate.id === id) ?? BUILTIN_SKIN;
   const epoch = ++skinLoadEpoch;
   try {
@@ -151,6 +208,9 @@ async function activateSkin(id: string, persist = true): Promise<void> {
     cancelInteraction();
     player = new MotionPlayer({ ...legacyMotionLibrary(), ...loaded });
     motions.value = loaded;
+    previousBehaviorAction = null;
+    recentBehaviorActions = [];
+    lastAmbientActionAt = Date.now();
     atlasImage.value = image;
     if (persist) {
       settings.value = { ...settings.value, selectedSkinId: skin.id };
@@ -193,6 +253,9 @@ function persistSoon(nextSettings = settings.value): void {
 function setMode(mode: ActivityMode): void {
   settings.value = { ...settings.value, mode };
   previousAmbientState = null;
+  previousBehaviorAction = null;
+  recentBehaviorActions = [];
+  lastAmbientActionAt = Date.now();
   cancelInteraction();
   player.settle();
   syncMotion();
@@ -228,6 +291,7 @@ async function toggleAutostart(): Promise<void> {
 }
 
 async function resetPosition(): Promise<void> {
+  cancelSleepSession();
   try {
     await centerWindow();
     showStatus("位置已重置");
@@ -251,6 +315,8 @@ async function temporarilyHide(): Promise<void> {
 
 function onPointerDown(event: PointerEvent): void {
   if (event.button !== 0 || pointerStart !== null) return;
+  lastUserInteractionAt = Date.now();
+  cancelSleepSession();
   const manual = shouldUseManualWindowDrag(navigator.userAgent);
   if (manual && event.currentTarget instanceof Element) {
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -333,6 +399,7 @@ function onPointerEnd(event: PointerEvent): void {
 }
 
 function cancelInteraction(): void {
+  cancelSleepSession();
   const pointerId = pointerStart?.pointerId;
   pointerStart = null;
   pendingDragPosition = null;
@@ -344,6 +411,8 @@ function cancelInteraction(): void {
 
 function onKeyboardPet(event: KeyboardEvent): void {
   if (event.repeat) return;
+  lastUserInteractionAt = Date.now();
+  cancelSleepSession();
   player.press(); player.release(); syncMotion();
   lastFrameAt = performance.now();
 }
@@ -358,6 +427,23 @@ async function handleMenuAction(action: ContextMenuAction): Promise<void> {
     return;
   }
   if (action.startsWith("skin:")) await activateSkin(action.slice(5));
+  if (action.startsWith("motion:")) {
+    const motionName = action.slice(7);
+    lastUserInteractionAt = Date.now();
+    if (motionName === "sleep") {
+      if (sleepSession.snapshot.active) {
+        cancelSleepSession();
+      } else {
+        const withTransitions = Boolean(motions.value["sleep-enter"] && motions.value["sleep-exit"]);
+        sleepSession.start(Math.random(), withTransitions);
+        play(withTransitions ? "sleep-enter" : "sleep");
+      }
+    } else {
+      cancelSleepSession();
+      play(motionName as MotionAction);
+    }
+    return;
+  }
   if (action === "reload-skins") await reloadSkins();
   if (action === "toggle-autostart") await toggleAutostart();
   if (action === "reset-position") await resetPosition();
@@ -427,7 +513,7 @@ watchEffect((onCleanup) => {
     const context = configureCanvasForDisplay(target, window.devicePixelRatio);
     if (!context) return;
     if (motion) drawMotionFrame(context, motion, frame);
-    else if (action !== "belly") drawAtlasFrame(context, image, ANIMATIONS[action].row, frame,
+    else if (isPetState(action)) drawAtlasFrame(context, image, ANIMATIONS[action].row, frame,
       image.naturalWidth / ATLAS_WIDTH, motions.value.idle ? ALLBUY_LEGACY_BODY_SCALE : 1);
   });
   onCleanup(() => window.cancelAnimationFrame(renderRequest));

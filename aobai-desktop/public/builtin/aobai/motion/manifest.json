@@ -7,7 +7,7 @@
       "file2x": "idle@2x.webp",
       "columns": 4,
       "durations": [
-        3500,
+        5000,
         250,
         200,
         160,
@@ -15,10 +15,10 @@
         60,
         90,
         100,
-        160,
-        140,
         180,
-        2000
+        260,
+        180,
+        3000
       ],
       "loop": true
     },
@@ -117,23 +117,55 @@
       "file2x": "stretch@2x.webp",
       "columns": 4,
       "durations": [
-        180,
-        180,
-        180,
-        220,
-        220,
-        300,
-        450,
-        700,
-        700,
+        200,
+        200,
+        200,
+        240,
+        240,
+        320,
         500,
+        950,
+        950,
+        600,
+        350,
         300,
-        250,
-        220,
-        220,
-        250,
-        350
+        280,
+        280,
+        300,
+        380
       ]
+    },
+    "sleep": {
+      "file": "sleep.webp",
+      "file2x": "sleep@2x.webp",
+      "columns": 4,
+      "durations": [
+        900,
+        900,
+        900,
+        900,
+        900,
+        900,
+        900,
+        900,
+        900,
+        900,
+        900,
+        900
+      ],
+      "loop": true
+    },
+    "sleep-enter": {
+      "file": "sleep-enter.webp",
+      "file2x": "sleep-enter@2x.webp",
+      "columns": 4,
+      "durations": [180, 180, 200, 220, 220, 240, 260, 300]
+    },
+    "sleep-exit": {
+      "file": "sleep-exit.webp",
+      "file2x": "sleep-exit@2x.webp",
+      "columns": 4,
+      "durations": [220, 200, 200, 220, 220, 240, 260, 300]
     }
   }
 }

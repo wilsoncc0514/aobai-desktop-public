@@ -1,7 +1,9 @@
 import type { MotionAction, MotionClip } from "./motion";
 
 export const STAGE_SIZE = 208;
-const MOTION_ACTIONS = ["idle", "belly", "waving", "running", "review"] as const;
+const MOTION_ACTIONS = [
+  "idle", "belly", "waving", "running", "review", "sleep", "sleep-enter", "sleep-exit",
+] as const;
 const MAX_CLIP_FRAMES = 128;
 const MAX_TOTAL_FRAMES = 256;
 

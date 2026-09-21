@@ -21,7 +21,8 @@ export type ContextMenuAction =
   | "reset-position"
   | "hide"
   | "reload-skins"
-  | `skin:${string}`;
+  | `skin:${string}`
+  | `motion:${string}`;
 
 function runningInTauri(): boolean {
   return isTauri();
@@ -124,6 +125,16 @@ export async function showPetContextMenu(
           })),
           { item: "Separator" as const },
           { text: "重新扫描 skin", action: action("reload-skins") },
+        ],
+      },
+      {
+        text: "动作",
+        items: [
+          { text: "伸个懒腰", action: action("motion:review") },
+          { text: "舔爪梳毛", action: action("motion:waving") },
+          { text: "舒适踩奶", action: action("motion:running") },
+          { text: "翻滚肚皮", action: action("motion:belly") },
+          { text: "打个小盹", action: action("motion:sleep") },
         ],
       },
       {
