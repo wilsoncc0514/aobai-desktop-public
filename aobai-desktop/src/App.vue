@@ -17,7 +17,9 @@ import {
   type BehaviorAction,
 } from "./behavior/actions";
 import { appendRecentAction, type PetContext } from "./behavior/context";
-import { RuleDecisionProvider } from "./behavior/ruleDecisionProvider";
+import { AmbientDecisionGate } from "./behavior/ambientDecisionGate";
+import { DecisionTrace } from "./behavior/decisionTrace";
+import { createBehaviorDecisionProvider } from "./behavior/provider";
 import { SleepSession } from "./behavior/sleepSession";
 import {
   nextAmbientDelayMs,
@@ -26,7 +28,9 @@ import {
 import {
   centerWindow,
   applyWindowLayer,
+  deleteJevKey,
   getAutostartEnabled,
+  getJevStatus,
   hideWindow,
   listenForTrayLayer,
   listenForTrayMode,
@@ -39,9 +43,13 @@ import {
   restoreWindowPosition,
   saveSettings,
   setAutostartEnabled,
+  setJevEnabled,
   showPetContextMenu,
   startWindowDrag,
+  testJevConnection,
+  verifyAndSaveJevKey,
   type ContextMenuAction,
+  type JevStatus,
 } from "./platform/desktop";
 import {
   draggedWindowPosition,
@@ -74,6 +82,9 @@ let animationTimer: number | undefined;
 let ambientTimer: number | undefined;
 let statusTimer: number | undefined;
 let saveTimer: number | undefined;
+let settingsSaveChain: Promise<void> = Promise.resolve();
+let jevOperationEpoch = 0;
+let jevConnectionEpoch = 0;
 let pointerStart: {
   point: Point;
   origin: Promise<Point | null>;
@@ -88,9 +99,38 @@ let previousBehaviorAction: BehaviorAction | null = null;
 let recentBehaviorActions: readonly BehaviorAction[] = [];
 let lastAmbientActionAt = Date.now();
 let lastUserInteractionAt = Date.now();
-const decisionProvider = new RuleDecisionProvider();
+const jevStatus = ref<JevStatus>({
+  configured: false,
+  enabled: false,
+  connected: false,
+});
+const ambientGate = new AmbientDecisionGate();
+const decisionTrace = import.meta.env.DEV ? new DecisionTrace() : null;
+let decisionProvider = createBehaviorDecisionProvider();
 const sleepSession = new SleepSession();
 const cleanups: Array<() => void> = [];
+
+async function refreshJevStatus(expectedEpoch?: number): Promise<JevStatus | null> {
+  try {
+    const status = await getJevStatus();
+    if (expectedEpoch !== undefined && expectedEpoch !== jevOperationEpoch) return null;
+    jevStatus.value = {
+      configured: status.configured,
+      enabled: status.enabled,
+      connected: status.configured ? jevStatus.value.connected : false,
+    };
+    decisionProvider = createBehaviorDecisionProvider(status.enabled ? "jev" : "rule", undefined, decisionTrace ?? undefined);
+    ambientGate.invalidate();
+    return status;
+  } catch {
+    if (expectedEpoch !== undefined && expectedEpoch !== jevOperationEpoch) return null;
+    jevStatus.value = { configured: false, enabled: false, connected: false };
+    decisionProvider = createBehaviorDecisionProvider("rule");
+    ambientGate.invalidate();
+    console.warn("读取 Jev 状态失败，已使用本地规则");
+    return null;
+  }
+}
 
 const modeLabel = computed(() => ({ quiet: "安静", normal: "普通", active: "活跃" })[settings.value.mode]);
 
@@ -112,6 +152,7 @@ function play(state: MotionAction): void {
 }
 
 function cancelSleepSession(): void {
+  ambientGate.invalidate();
   if (!sleepSession.cancel()) return;
   player.reset();
   syncMotion();
@@ -128,6 +169,11 @@ function scheduleAmbientAction(): void {
       currentState.value === "idle" &&
       !player.isHeld
     ) {
+      const generation = ambientGate.begin();
+      if (generation === null) {
+        scheduleAmbientAction();
+        return;
+      }
       const availableMotions = motions.value.idle ? Object.keys(motions.value) : null;
       if (availableMotions === null) {
         const state = selectAmbientAction(
@@ -135,8 +181,10 @@ function scheduleAmbientAction(): void {
           Math.random(),
           previousAmbientState,
         );
-        previousAmbientState = state;
-        play(state);
+        if (ambientGate.finish(generation)) {
+          previousAmbientState = state;
+          play(state);
+        }
       } else {
         const now = Date.now();
         const availableActions = availableBehaviorActionsForMotions(availableMotions);
@@ -149,26 +197,48 @@ function scheduleAmbientAction(): void {
           secondsSinceUserInteraction: Math.max(0, (now - lastUserInteractionAt) / 1_000),
           hour: new Date(now).getHours(),
         };
-        const behaviorAction = decisionProvider.decide(
+        const decision = decisionProvider.decide(
           context,
           availableActions,
           Math.random(),
         );
-        previousBehaviorAction = behaviorAction;
-        recentBehaviorActions = appendRecentAction(recentBehaviorActions, behaviorAction);
-        lastAmbientActionAt = now;
-        if (behaviorAction === "sleep") {
-          const withTransitions = Boolean(motions.value["sleep-enter"] && motions.value["sleep-exit"]);
-          sleepSession.start(Math.random(), withTransitions);
-          play(withTransitions ? "sleep-enter" : "sleep");
+        if (decision instanceof Promise) {
+          void decision.then((action) => {
+            if (!ambientGate.finish(generation) || disposed ||
+              document.visibilityState !== "visible" || currentState.value !== "idle" || player.isHeld) return;
+            applyAmbientBehavior(action, Date.now());
+          }).catch(() => {
+            ambientGate.finish(generation);
+            console.warn("行为决策失败，等待下一次本地调度");
+          });
         } else {
-          sleepSession.cancel();
-          play(behaviorActionToMotionAction(behaviorAction));
+          if (ambientGate.finish(generation)) {
+            decisionTrace?.record({
+              provider: "rule", availableActions, selectedAction: decision,
+              latencyMs: 0, fallbackReason: null, timestamp: now,
+            });
+            applyAmbientBehavior(decision, now);
+          }
         }
       }
     }
     scheduleAmbientAction();
   }, delay);
+}
+
+function applyAmbientBehavior(behaviorAction: BehaviorAction, now: number): void {
+  ambientGate.invalidate();
+  previousBehaviorAction = behaviorAction;
+  recentBehaviorActions = appendRecentAction(recentBehaviorActions, behaviorAction);
+  lastAmbientActionAt = now;
+  if (behaviorAction === "sleep") {
+    const withTransitions = Boolean(motions.value["sleep-enter"] && motions.value["sleep-exit"]);
+    sleepSession.start(Math.random(), withTransitions);
+    play(withTransitions ? "sleep-enter" : "sleep");
+  } else {
+    sleepSession.cancel();
+    play(behaviorActionToMotionAction(behaviorAction));
+  }
 }
 
 function startAnimationClock(): void {
@@ -240,10 +310,11 @@ async function reloadSkins(showResult = true): Promise<void> {
   }
 }
 
-function persistSoon(nextSettings = settings.value): void {
+function persistSoon(): void {
   if (saveTimer !== undefined) window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => {
-    void saveSettings(nextSettings).catch((error: unknown) => {
+    const snapshot = settings.value;
+    settingsSaveChain = settingsSaveChain.then(() => saveSettings(snapshot)).catch((error: unknown) => {
       console.error("保存设置失败", error);
       showStatus("设置保存失败");
     });
@@ -448,12 +519,121 @@ async function handleMenuAction(action: ContextMenuAction): Promise<void> {
   if (action === "toggle-autostart") await toggleAutostart();
   if (action === "reset-position") await resetPosition();
   if (action === "hide") await temporarilyHide();
+  if (action === "jev:toggle-enabled") {
+    const epoch = ++jevOperationEpoch;
+    jevConnectionEpoch++;
+    if (!jevStatus.value.configured) {
+      showStatus("请先从剪贴板粘贴 API Key");
+      return;
+    }
+    const nextEnabled = !jevStatus.value.enabled;
+    try {
+      await setJevEnabled(nextEnabled);
+      if (epoch !== jevOperationEpoch) return;
+      settings.value = { ...settings.value, jevEnabled: nextEnabled };
+      const status = await refreshJevStatus(epoch);
+      if (epoch !== jevOperationEpoch) return;
+      showStatus(status?.enabled === nextEnabled ? (nextEnabled ? "已开启 Jev 决策" : "已切回本地规则") : "Jev 状态未更新");
+    } catch {
+      if (epoch !== jevOperationEpoch) return;
+      showStatus("操作失败");
+    }
+    return;
+  }
+  if (action === "jev:paste-key") {
+    const epoch = ++jevOperationEpoch;
+    jevConnectionEpoch++;
+    let clipText = "";
+    try {
+      clipText = (await navigator.clipboard.readText()).trim();
+    } catch {
+      if (epoch !== jevOperationEpoch) return;
+      showStatus("无法访问剪贴板，请检查权限");
+      return;
+    }
+    if (epoch !== jevOperationEpoch) return;
+    if (!clipText) {
+      showStatus("剪贴板内容为空");
+      return;
+    }
+    if (clipText.length < 5 || clipText.length > 512 || /[\r\n\t]/.test(clipText)) {
+      showStatus("剪贴板内容格式无效");
+      return;
+    }
+    showStatus("正在验证 API Key...");
+    try {
+      const pending = verifyAndSaveJevKey(clipText);
+      clipText = "";
+      const result = await pending;
+      if (epoch !== jevOperationEpoch) return;
+      jevConnectionEpoch++;
+      settings.value = { ...settings.value, jevEnabled: true };
+      const status = await refreshJevStatus(epoch);
+      if (epoch !== jevOperationEpoch) return;
+      if (status?.configured && status.enabled) {
+        jevStatus.value = { ...jevStatus.value, connected: true };
+        showStatus(`API Key 已配置，连接成功 (${result.latencyMs}ms)`);
+      } else if (!status) {
+        showStatus("API Key 已保存，但状态读取失败；请重启后测试连接");
+      } else if (!status.configured) {
+        showStatus("系统凭据保存后不可读取");
+      } else {
+        showStatus("API Key 已保存，但 Jev 未启用");
+      }
+    } catch {
+      if (epoch !== jevOperationEpoch) return;
+      showStatus("API Key 验证或保存失败");
+    }
+    return;
+  }
+  if (action === "jev:test-connection") {
+    const epoch = ++jevConnectionEpoch;
+    const operationEpoch = jevOperationEpoch;
+    if (!jevStatus.value.configured) {
+      showStatus("未配置 API Key");
+      return;
+    }
+    showStatus("正在测试 Jev 连接...");
+    try {
+      const result = await testJevConnection();
+      if (epoch !== jevConnectionEpoch || operationEpoch !== jevOperationEpoch) return;
+      jevStatus.value = { ...jevStatus.value, connected: true };
+      showStatus(`Jev 连接正常 (${result.latencyMs}ms)`);
+    } catch {
+      if (epoch !== jevConnectionEpoch || operationEpoch !== jevOperationEpoch) return;
+      jevStatus.value = { ...jevStatus.value, connected: false };
+      showStatus("Jev 连接失败");
+    }
+    return;
+  }
+  if (action === "jev:delete-key") {
+    const epoch = ++jevOperationEpoch;
+    jevConnectionEpoch++;
+    try {
+      await deleteJevKey();
+      if (epoch !== jevOperationEpoch) return;
+      settings.value = { ...settings.value, jevEnabled: false };
+      const status = await refreshJevStatus(epoch);
+      if (epoch !== jevOperationEpoch) return;
+      jevStatus.value = { ...jevStatus.value, connected: false };
+      showStatus(status?.enabled ? "系统凭据已删除；开发环境变量仍在启用 Jev" : "已删除 API Key，已切换为本地规则");
+    } catch {
+      if (epoch !== jevOperationEpoch) return;
+      showStatus("删除失败");
+    }
+    return;
+  }
 }
 
 async function openMenu(): Promise<void> {
   cancelInteraction();
   try {
-    await showPetContextMenu(settings.value, skins.value, (action) => void handleMenuAction(action));
+    await showPetContextMenu(
+      settings.value,
+      skins.value,
+      jevStatus.value,
+      (action) => void handleMenuAction(action),
+    );
   } catch (error) {
     console.error("打开右键菜单失败", error);
     showStatus("菜单打开失败");
@@ -461,6 +641,22 @@ async function openMenu(): Promise<void> {
 }
 
 onMounted(async () => {
+  if (decisionTrace) {
+    Object.defineProperty(window, "__AOBAI_DECISION_TRACE__", {
+      value: () => decisionTrace.snapshot(), configurable: true,
+    });
+    Object.defineProperty(window, "__AOBAI_COMPARE_JEV__", {
+      value: async () => {
+        if (!jevStatus.value.enabled) throw new Error("Jev is disabled");
+        const { compareQualityScenarios } = await import("./behavior/qualityScenarios");
+        const trace = new DecisionTrace();
+        const provider = createBehaviorDecisionProvider("jev", undefined, trace);
+        return compareQualityScenarios(provider, trace, ambientGate, () => jevStatus.value.enabled && !disposed);
+      },
+      configurable: true,
+    });
+  }
+  await refreshJevStatus();
   const onVisibility = () => {
     if (document.visibilityState !== "visible") {
       cancelInteraction(); player.reset(); syncMotion();
@@ -521,6 +717,9 @@ watchEffect((onCleanup) => {
 
 onBeforeUnmount(() => {
   disposed = true;
+  ambientGate.invalidate();
+  if (decisionTrace) Reflect.deleteProperty(window, "__AOBAI_DECISION_TRACE__");
+  if (decisionTrace) Reflect.deleteProperty(window, "__AOBAI_COMPARE_JEV__");
   skinLoadEpoch++;
   cancelInteraction();
   if (animationTimer !== undefined) window.clearInterval(animationTimer);

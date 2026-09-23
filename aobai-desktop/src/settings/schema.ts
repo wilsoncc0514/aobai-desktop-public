@@ -1,4 +1,4 @@
-export const SETTINGS_VERSION = 4 as const;
+export const SETTINGS_VERSION = 5 as const;
 export const BUILTIN_SKIN_ID = "AllBuy" as const;
 export const ACTIVITY_MODES = ["quiet", "normal", "active"] as const;
 export const WINDOW_LAYERS = ["top", "normal", "bottom"] as const;
@@ -18,6 +18,7 @@ export interface DesktopSettings {
   readonly autostart: boolean;
   readonly position: WindowPosition | null;
   readonly selectedSkinId: string;
+  readonly jevEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: DesktopSettings = Object.freeze({
@@ -27,6 +28,7 @@ export const DEFAULT_SETTINGS: DesktopSettings = Object.freeze({
   autostart: false,
   position: null,
   selectedSkinId: BUILTIN_SKIN_ID,
+  jevEnabled: false,
 });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -45,7 +47,7 @@ function isPosition(value: unknown): value is WindowPosition {
 
 export function normalizeSettings(value: unknown): DesktopSettings {
   if (!isRecord(value)) throw new Error("设置文件不是有效对象");
-  if (![1, 2, 3, SETTINGS_VERSION].includes(value.version as number)) {
+  if (![1, 2, 3, 4, SETTINGS_VERSION].includes(value.version as number)) {
     throw new Error(`不支持的设置版本：${String(value.version)}`);
   }
   if (!ACTIVITY_MODES.includes(value.mode as ActivityMode)) {
@@ -68,11 +70,12 @@ export function normalizeSettings(value: unknown): DesktopSettings {
     autostart: value.autostart,
     position: value.position as WindowPosition | null,
     selectedSkinId:
-      (value.version === 3 || value.version === SETTINGS_VERSION) &&
+      (value.version === 3 || value.version === 4 || value.version === SETTINGS_VERSION) &&
       typeof value.selectedSkinId === "string"
         ? value.selectedSkinId === "aobai"
           ? BUILTIN_SKIN_ID
           : value.selectedSkinId
         : BUILTIN_SKIN_ID,
+    jevEnabled: typeof value.jevEnabled === "boolean" ? value.jevEnabled : false,
   };
 }

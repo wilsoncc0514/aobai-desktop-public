@@ -14,6 +14,18 @@ import { contextMenuXOffset } from "./menuPlacement";
 const WEB_STORAGE_KEY = "aobai-desktop-settings";
 let previousContextMenu: Menu | undefined;
 
+export interface JevStatus {
+  readonly configured: boolean;
+  readonly enabled: boolean;
+  readonly connected?: boolean;
+}
+
+export interface JevTestResult {
+  readonly success: boolean;
+  readonly latencyMs: number;
+  readonly message: string;
+}
+
 export type ContextMenuAction =
   | `mode:${DesktopSettings["mode"]}`
   | `layer:${DesktopSettings["windowLayer"]}`
@@ -22,7 +34,11 @@ export type ContextMenuAction =
   | "hide"
   | "reload-skins"
   | `skin:${string}`
-  | `motion:${string}`;
+  | `motion:${string}`
+  | "jev:toggle-enabled"
+  | "jev:paste-key"
+  | "jev:test-connection"
+  | "jev:delete-key";
 
 function runningInTauri(): boolean {
   return isTauri();
@@ -101,9 +117,105 @@ export async function applyWindowLayer(layer: DesktopSettings["windowLayer"]): P
   if (layer === "bottom") await window.setAlwaysOnBottom(true);
 }
 
+export function buildContextMenuTree(
+  settings: DesktopSettings,
+  skins: readonly { id: string; displayName: string }[],
+  jevStatus: JevStatus,
+  action: (id: ContextMenuAction) => () => void,
+) {
+  return [
+    {
+      text: "外观",
+      items: [
+        ...skins.map((skin) => ({
+          text: skin.displayName,
+          checked: skin.id === settings.selectedSkinId,
+          action: action(`skin:${skin.id}`),
+        })),
+        { item: "Separator" as const },
+        { text: "重新扫描 skin", action: action("reload-skins") },
+      ],
+    },
+    {
+      text: "动作",
+      items: [
+        { text: "伸个懒腰", action: action("motion:review") },
+        { text: "舔爪梳毛", action: action("motion:waving") },
+        { text: "舒适踩奶", action: action("motion:running") },
+        { text: "翻滚肚皮", action: action("motion:belly") },
+        { text: "打个小盹", action: action("motion:sleep") },
+        { item: "Separator" as const },
+        {
+          text: "Jev",
+          items: [
+            {
+              text: !jevStatus.configured
+                ? "状态：未配置"
+                : jevStatus.connected
+                  ? "状态：已连接"
+                  : "状态：未连接",
+              enabled: false,
+            },
+            {
+              text: "使用 Jev 决策",
+              checked: jevStatus.enabled,
+              enabled: jevStatus.configured,
+              action: action("jev:toggle-enabled"),
+            },
+            {
+              text: "从剪贴板粘贴 API Key",
+              action: action("jev:paste-key"),
+            },
+            {
+              text: "测试连接",
+              enabled: jevStatus.configured,
+              action: action("jev:test-connection"),
+            },
+            {
+              text: "删除 API Key",
+              enabled: jevStatus.configured,
+              action: action("jev:delete-key"),
+            },
+          ],
+        },
+      ],
+    },
+    {
+      text: "窗口",
+      items: [
+        {
+          text: "层级",
+          items: [
+            { text: "置顶", checked: settings.windowLayer === "top", action: action("layer:top") },
+            { text: "普通", checked: settings.windowLayer === "normal", action: action("layer:normal") },
+            { text: "置底", checked: settings.windowLayer === "bottom", action: action("layer:bottom") },
+          ],
+        },
+        { text: "重置位置", action: action("reset-position") },
+      ],
+    },
+    {
+      text: "行为",
+      items: [
+        { text: "安静", checked: settings.mode === "quiet", action: action("mode:quiet") },
+        { text: "普通", checked: settings.mode === "normal", action: action("mode:normal") },
+        { text: "活跃", checked: settings.mode === "active", action: action("mode:active") },
+        { item: "Separator" as const },
+        {
+          text: settings.autostart ? "关闭开机启动" : "开启开机启动",
+          action: action("toggle-autostart"),
+        },
+      ],
+    },
+    { item: "Separator" as const },
+    { text: "暂时隐藏", action: action("hide") },
+  ];
+}
+
 export async function showPetContextMenu(
   settings: DesktopSettings,
   skins: readonly { id: string; displayName: string }[],
+  jevStatus: JevStatus,
   onAction: (action: ContextMenuAction) => void,
 ): Promise<boolean> {
   if (!runningInTauri()) return false;
@@ -114,59 +226,7 @@ export async function showPetContextMenu(
 
   const action = (id: ContextMenuAction) => () => onAction(id);
   const menu = await Menu.new({
-    items: [
-      {
-        text: "外观",
-        items: [
-          ...skins.map((skin) => ({
-            text: skin.displayName,
-            checked: skin.id === settings.selectedSkinId,
-            action: action(`skin:${skin.id}`),
-          })),
-          { item: "Separator" as const },
-          { text: "重新扫描 skin", action: action("reload-skins") },
-        ],
-      },
-      {
-        text: "动作",
-        items: [
-          { text: "伸个懒腰", action: action("motion:review") },
-          { text: "舔爪梳毛", action: action("motion:waving") },
-          { text: "舒适踩奶", action: action("motion:running") },
-          { text: "翻滚肚皮", action: action("motion:belly") },
-          { text: "打个小盹", action: action("motion:sleep") },
-        ],
-      },
-      {
-        text: "窗口",
-        items: [
-          {
-            text: "层级",
-            items: [
-              { text: "置顶", checked: settings.windowLayer === "top", action: action("layer:top") },
-              { text: "普通", checked: settings.windowLayer === "normal", action: action("layer:normal") },
-              { text: "置底", checked: settings.windowLayer === "bottom", action: action("layer:bottom") },
-            ],
-          },
-          { text: "重置位置", action: action("reset-position") },
-        ],
-      },
-      {
-        text: "行为",
-        items: [
-          { text: "安静", checked: settings.mode === "quiet", action: action("mode:quiet") },
-          { text: "普通", checked: settings.mode === "normal", action: action("mode:normal") },
-          { text: "活跃", checked: settings.mode === "active", action: action("mode:active") },
-          { item: "Separator" },
-          {
-            text: settings.autostart ? "关闭开机启动" : "开启开机启动",
-            action: action("toggle-autostart"),
-          },
-        ],
-      },
-      { item: "Separator" },
-      { text: "暂时隐藏", action: action("hide") },
-    ],
+    items: buildContextMenuTree(settings, skins, jevStatus, action),
   });
   previousContextMenu = menu;
 
@@ -224,4 +284,29 @@ export async function setAutostartEnabled(enabled: boolean): Promise<void> {
   if (!runningInTauri()) return;
   if (enabled) await enable();
   else await disable();
+}
+
+export async function getJevStatus(): Promise<JevStatus> {
+  if (!runningInTauri()) return { configured: false, enabled: false };
+  return invoke<JevStatus>("get_jev_status");
+}
+
+export async function setJevEnabled(enabled: boolean): Promise<void> {
+  if (!runningInTauri()) return;
+  await invoke("jev_set_enabled", { enabled });
+}
+
+export async function verifyAndSaveJevKey(key: string): Promise<JevTestResult> {
+  if (!runningInTauri()) throw new Error("离线环境不可用");
+  return invoke<JevTestResult>("jev_verify_and_save_key", { key });
+}
+
+export async function testJevConnection(): Promise<JevTestResult> {
+  if (!runningInTauri()) throw new Error("离线环境不可用");
+  return invoke<JevTestResult>("jev_test_connection");
+}
+
+export async function deleteJevKey(): Promise<void> {
+  if (!runningInTauri()) return;
+  await invoke("jev_delete_key");
 }

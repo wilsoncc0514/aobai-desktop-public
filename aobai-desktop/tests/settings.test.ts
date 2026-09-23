@@ -7,7 +7,7 @@ describe("settings schema", () => {
   });
 
   it("rejects unknown future versions", () => {
-    expect(() => normalizeSettings({ ...DEFAULT_SETTINGS, version: 5 })).toThrow(
+    expect(() => normalizeSettings({ ...DEFAULT_SETTINGS, version: 6 })).toThrow(
       "不支持的设置版本",
     );
   });
@@ -21,12 +21,34 @@ describe("settings schema", () => {
         position: { x: 12, y: 34 },
       }),
     ).toEqual({
-      version: 4,
+      version: 5,
       mode: "quiet",
       windowLayer: "top",
       autostart: true,
       position: { x: 12, y: 34 },
       selectedSkinId: BUILTIN_SKIN_ID,
+      jevEnabled: false,
+    });
+  });
+
+  it("migrates version 4 settings to version 5 with jevEnabled: false", () => {
+    expect(
+      normalizeSettings({
+        version: 4,
+        mode: "active",
+        windowLayer: "normal",
+        autostart: true,
+        position: { x: 50, y: 50 },
+        selectedSkinId: "custom-skin",
+      }),
+    ).toEqual({
+      version: 5,
+      mode: "active",
+      windowLayer: "normal",
+      autostart: true,
+      position: { x: 50, y: 50 },
+      selectedSkinId: "custom-skin",
+      jevEnabled: false,
     });
   });
 

@@ -6,5 +6,5 @@ export interface BehaviorDecisionProvider {
     context: PetContext,
     availableActions: readonly BehaviorAction[],
     sample: number,
-  ): BehaviorAction;
+  ): BehaviorAction | Promise<BehaviorAction>;
 }

@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const SETTINGS_VERSION: u8 = 4;
+pub const SETTINGS_VERSION: u8 = 5;
 pub const BUILTIN_SKIN_ID: &str = "AllBuy";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -33,6 +33,8 @@ pub struct DesktopSettings {
     pub autostart: bool,
     pub position: Option<WindowPosition>,
     pub selected_skin_id: String,
+    #[serde(default)]
+    pub jev_enabled: bool,
 }
 
 impl Default for DesktopSettings {
@@ -44,6 +46,7 @@ impl Default for DesktopSettings {
             autostart: false,
             position: None,
             selected_skin_id: BUILTIN_SKIN_ID.to_owned(),
+            jev_enabled: false,
         }
     }
 }
@@ -76,6 +79,16 @@ struct VersionThreeSettings {
     selected_skin_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionFourSettings {
+    mode: String,
+    window_layer: WindowLayer,
+    autostart: bool,
+    position: Option<WindowPosition>,
+    selected_skin_id: String,
+}
+
 impl From<VersionOneSettings> for DesktopSettings {
     fn from(value: VersionOneSettings) -> Self {
         debug_assert_eq!(value.version, 1);
@@ -86,6 +99,7 @@ impl From<VersionOneSettings> for DesktopSettings {
             autostart: value.autostart,
             position: value.position,
             selected_skin_id: BUILTIN_SKIN_ID.to_owned(),
+            jev_enabled: false,
         }
     }
 }
@@ -131,6 +145,7 @@ pub fn load_from_path(path: &Path) -> Result<DesktopSettings, String> {
                         autostart: value.autostart,
                         position: value.position,
                         selected_skin_id: BUILTIN_SKIN_ID.to_owned(),
+                        jev_enabled: false,
                     })
                     .map_err(|error| format!("旧版设置无法迁移：{error}"))?,
                 3 => serde_json::from_value::<VersionThreeSettings>(value)
@@ -145,6 +160,18 @@ pub fn load_from_path(path: &Path) -> Result<DesktopSettings, String> {
                         } else {
                             value.selected_skin_id
                         },
+                        jev_enabled: false,
+                    })
+                    .map_err(|error| format!("旧版设置无法迁移：{error}"))?,
+                4 => serde_json::from_value::<VersionFourSettings>(value)
+                    .map(|value| DesktopSettings {
+                        version: SETTINGS_VERSION,
+                        mode: value.mode,
+                        window_layer: value.window_layer,
+                        autostart: value.autostart,
+                        position: value.position,
+                        selected_skin_id: value.selected_skin_id,
+                        jev_enabled: false,
                     })
                     .map_err(|error| format!("旧版设置无法迁移：{error}"))?,
                 version if version == u64::from(SETTINGS_VERSION) => {
@@ -188,7 +215,7 @@ fn backup_legacy_settings(path: &Path) -> Result<(), String> {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Ok(());
     };
-    let Some(version @ (1..=3)) = value.get("version").and_then(serde_json::Value::as_u64) else {
+    let Some(version @ (1..=4)) = value.get("version").and_then(serde_json::Value::as_u64) else {
         return Ok(());
     };
     let backup = path.with_extension(format!("v{version}-backup.json"));
@@ -335,6 +362,34 @@ mod tests {
 
         assert_eq!(
             fs::read(path.with_extension("v3-backup.json")).expect("read migration backup"),
+            legacy
+        );
+    }
+
+    #[test]
+    fn version_four_settings_are_migrated_and_backed_up() {
+        let directory = tempfile::tempdir().expect("create temp directory");
+        let path = directory.path().join("settings.json");
+        let legacy = br#"{
+          "version": 4,
+          "mode": "quiet",
+          "windowLayer": "normal",
+          "autostart": true,
+          "position": { "x": 100, "y": 200 },
+          "selectedSkinId": "custom_skin"
+        }"#;
+        fs::write(&path, legacy).expect("write version four settings");
+
+        let migrated = load_from_path(&path).expect("migrate version four settings");
+        assert_eq!(migrated.version, SETTINGS_VERSION);
+        assert_eq!(migrated.mode, "quiet");
+        assert_eq!(migrated.window_layer, WindowLayer::Normal);
+        assert_eq!(migrated.selected_skin_id, "custom_skin");
+        assert!(!migrated.jev_enabled);
+        save_to_path(&path, &migrated).expect("save migrated settings");
+
+        assert_eq!(
+            fs::read(path.with_extension("v4-backup.json")).expect("read migration backup"),
             legacy
         );
     }
