@@ -1,11 +1,38 @@
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 use std::time::Duration;
 
 const ACTIONS: [&str; 5] = ["idle", "groom", "knead", "stretch", "sleep"];
 const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const SERVICE_NAME: &str = "aobai-desktop";
 const KEYRING_USER: &str = "typesafe_api_key";
+
+struct CredentialCache {
+    checked: bool,
+    key: Option<String>,
+}
+
+impl CredentialCache {
+    fn get_or_load(&mut self, load: impl FnOnce() -> Option<String>) -> Option<&str> {
+        if !self.checked {
+            self.key = load();
+            self.checked = true;
+        }
+        self.key.as_deref()
+    }
+
+    fn replace(&mut self, key: Option<String>) {
+        self.key = key;
+        self.checked = true;
+    }
+}
+
+// Keychain authorization is needed at most once per process. Never persist this cache.
+static CREDENTIAL_CACHE: Mutex<CredentialCache> = Mutex::new(CredentialCache {
+    checked: false,
+    key: None,
+});
 const DECISION_INSTRUCTIONS: &str = concat!(
     "Select exactly one next ambient pet action from `availableActions`. ",
     "Use `mode`, `hour`, `recentActions`, `secondsSinceLastAmbientAction`, and ",
@@ -106,7 +133,7 @@ fn response_status_error(status: reqwest::StatusCode) -> Option<String> {
     }
 }
 
-pub fn get_api_key() -> Option<String> {
+fn read_keychain_key() -> Option<String> {
     if let Ok(entry) = Entry::new(SERVICE_NAME, KEYRING_USER)
         && let Ok(key) = entry.get_password()
     {
@@ -115,6 +142,10 @@ pub fn get_api_key() -> Option<String> {
             return Some(trimmed.to_owned());
         }
     }
+    None
+}
+
+fn env_api_key() -> Option<String> {
     if let Ok(env_key) = std::env::var("TYPESAFE_API_KEY") {
         let trimmed = env_key.trim();
         if !trimmed.is_empty() {
@@ -124,8 +155,21 @@ pub fn get_api_key() -> Option<String> {
     None
 }
 
+pub fn get_api_key() -> Option<String> {
+    let keychain_key = CREDENTIAL_CACHE
+        .lock()
+        .ok()
+        .and_then(|mut cache| cache.get_or_load(read_keychain_key).map(str::to_owned));
+    keychain_key.or_else(env_api_key)
+}
+
 pub fn has_api_key() -> bool {
-    get_api_key().is_some()
+    let keychain_available = CREDENTIAL_CACHE
+        .lock()
+        .ok()
+        .and_then(|mut cache| cache.get_or_load(read_keychain_key).map(|_| ()))
+        .is_some();
+    keychain_available || env_api_key().is_some()
 }
 
 pub fn set_api_key(key: &str) -> Result<(), String> {
@@ -136,6 +180,9 @@ pub fn set_api_key(key: &str) -> Result<(), String> {
     if trimmed.len() > 512 {
         return Err("API Key 长度超出限制".into());
     }
+    let mut cache = CREDENTIAL_CACHE
+        .lock()
+        .map_err(|_| "Jev 凭据缓存不可用".to_owned())?;
     let entry = Entry::new(SERVICE_NAME, KEYRING_USER)
         .map_err(|error| format!("无法访问系统安全凭据服务：{error}"))?;
     entry
@@ -148,22 +195,30 @@ pub fn set_api_key(key: &str) -> Result<(), String> {
         Ok(saved) => saved,
         Err(_) => {
             let _ = entry.delete_credential();
+            cache.replace(None);
             return Err("系统凭据写入后无法重新读取，已取消保存".into());
         }
     };
     if saved != trimmed {
         let _ = entry.delete_credential();
+        cache.replace(None);
         return Err("系统凭据写入校验失败，已取消保存".into());
     }
+    cache.replace(Some(saved));
     Ok(())
 }
 
 pub fn delete_api_key() -> Result<(), String> {
+    let mut cache = CREDENTIAL_CACHE
+        .lock()
+        .map_err(|_| "Jev 凭据缓存不可用".to_owned())?;
     let entry = Entry::new(SERVICE_NAME, KEYRING_USER)
         .map_err(|error| format!("无法访问系统安全凭据服务：{error}"))?;
     match entry.delete_credential() {
-        Ok(_) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
+        Ok(_) | Err(keyring::Error::NoEntry) => {
+            cache.replace(None);
+            Ok(())
+        }
         Err(error) => Err(format!("删除 API Key 失败：{error}")),
     }
 }
@@ -268,6 +323,60 @@ pub async fn decide(input: JevInput) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn keychain_cache_reads_once_and_updates_after_save_or_delete() {
+        let reads = Cell::new(0);
+        let mut cache = CredentialCache {
+            checked: false,
+            key: None,
+        };
+        assert_eq!(
+            cache.get_or_load(|| {
+                reads.set(reads.get() + 1);
+                Some("synthetic-test-key".to_owned())
+            }),
+            Some("synthetic-test-key")
+        );
+        assert_eq!(
+            cache.get_or_load(|| panic!("unexpected Keychain read")),
+            Some("synthetic-test-key")
+        );
+        assert_eq!(reads.get(), 1);
+
+        cache.replace(Some("replacement-test-key".to_owned()));
+        assert_eq!(
+            cache.get_or_load(|| panic!("unexpected Keychain read")),
+            Some("replacement-test-key")
+        );
+        cache.replace(None);
+        assert_eq!(
+            cache.get_or_load(|| panic!("unexpected Keychain read")),
+            None
+        );
+    }
+
+    #[test]
+    fn unavailable_keychain_is_checked_once_per_process() {
+        let reads = Cell::new(0);
+        let mut cache = CredentialCache {
+            checked: false,
+            key: None,
+        };
+        assert_eq!(
+            cache.get_or_load(|| {
+                reads.set(reads.get() + 1);
+                None
+            }),
+            None
+        );
+        assert_eq!(
+            cache.get_or_load(|| panic!("unexpected Keychain read")),
+            None
+        );
+        assert_eq!(reads.get(), 1);
+    }
 
     #[test]
     fn response_statuses_are_classified_without_response_body_or_headers() {
