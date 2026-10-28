@@ -25,6 +25,7 @@ export class SleepSession {
   private completedRounds = 0;
   private phase: SleepSessionSnapshot["phase"] = "inactive";
   private withTransitions = false;
+  private started = false;
 
   get snapshot(): SleepSessionSnapshot {
     return {
@@ -41,6 +42,7 @@ export class SleepSession {
     );
     this.completedRounds = 0;
     this.withTransitions = withTransitions;
+    this.started = false;
     this.phase = withTransitions ? "entering" : "sleeping";
     return this.totalRounds;
   }
@@ -50,6 +52,7 @@ export class SleepSession {
     this.totalRounds = 0;
     this.completedRounds = 0;
     this.withTransitions = false;
+    this.started = false;
     this.phase = "inactive";
     return wasActive;
   }
@@ -58,9 +61,12 @@ export class SleepSession {
   observeAdvance(before: MotionPosition, after: MotionPosition): SleepSessionCommand {
     if (this.totalRounds === 0) return null;
     if (this.phase === "entering") {
+      // A requested entry can wait for the preceding clip's resting endpoint.
+      if (before.action !== "sleep-enter") return null;
       if (before.action === "sleep-enter" && after.action === "sleep-enter") return null;
       if (before.action === "sleep-enter" && after.action === "idle") {
         this.phase = "sleeping";
+        this.started = true;
         return "sleep";
       }
       this.cancel();
@@ -73,6 +79,10 @@ export class SleepSession {
         return "complete";
       }
       this.cancel();
+      return null;
+    }
+    if (!this.started) {
+      if (after.action === "sleep") this.started = true;
       return null;
     }
     if (before.action !== "sleep" || after.action !== "sleep") {

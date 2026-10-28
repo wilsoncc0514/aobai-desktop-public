@@ -11,19 +11,37 @@ const KEYRING_USER: &str = "typesafe_api_key";
 struct CredentialCache {
     checked: bool,
     key: Option<String>,
+    unavailable: bool,
 }
 
 impl CredentialCache {
-    fn get_or_load(&mut self, load: impl FnOnce() -> Option<String>) -> Option<&str> {
+    fn get_or_load(
+        &mut self,
+        load: impl FnOnce() -> Result<Option<String>, String>,
+    ) -> Result<Option<&str>, String> {
         if !self.checked {
-            self.key = load();
+            match load() {
+                Ok(key) => self.key = key,
+                Err(_) => self.unavailable = true,
+            }
             self.checked = true;
         }
-        self.key.as_deref()
+        if self.unavailable {
+            return Err("系统安全凭据暂不可读取，请允许钥匙串访问后测试连接重试".into());
+        }
+        Ok(self.key.as_deref())
+    }
+
+    fn retry_unavailable(&mut self) {
+        if self.unavailable {
+            self.checked = false;
+            self.unavailable = false;
+        }
     }
 
     fn replace(&mut self, key: Option<String>) {
         self.key = key;
+        self.unavailable = false;
         self.checked = true;
     }
 }
@@ -32,6 +50,7 @@ impl CredentialCache {
 static CREDENTIAL_CACHE: Mutex<CredentialCache> = Mutex::new(CredentialCache {
     checked: false,
     key: None,
+    unavailable: false,
 });
 const DECISION_INSTRUCTIONS: &str = concat!(
     "Select exactly one next ambient pet action from `availableActions`. ",
@@ -133,16 +152,26 @@ fn response_status_error(status: reqwest::StatusCode) -> Option<String> {
     }
 }
 
-fn read_keychain_key() -> Option<String> {
-    if let Ok(entry) = Entry::new(SERVICE_NAME, KEYRING_USER)
-        && let Ok(key) = entry.get_password()
-    {
-        let trimmed = key.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_owned());
+fn read_keychain_key() -> Result<Option<String>, String> {
+    let entry =
+        Entry::new(SERVICE_NAME, KEYRING_USER).map_err(|_| "系统安全凭据服务不可用".to_owned())?;
+    match entry.get_password() {
+        Ok(key) => {
+            let trimmed = key.trim();
+            Ok((!trimmed.is_empty()).then(|| trimmed.to_owned()))
         }
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err("系统安全凭据读取失败".into()),
     }
-    None
+}
+
+// Retry only through an explicit user connection test, avoiding repeated OS prompts.
+pub fn retry_unavailable_credentials() -> Result<(), String> {
+    CREDENTIAL_CACHE
+        .lock()
+        .map_err(|_| "Jev 凭据缓存不可用".to_owned())?
+        .retry_unavailable();
+    Ok(())
 }
 
 fn env_api_key() -> Option<String> {
@@ -155,21 +184,20 @@ fn env_api_key() -> Option<String> {
     None
 }
 
-pub fn get_api_key() -> Option<String> {
+pub fn get_api_key() -> Result<Option<String>, String> {
     let keychain_key = CREDENTIAL_CACHE
         .lock()
-        .ok()
-        .and_then(|mut cache| cache.get_or_load(read_keychain_key).map(str::to_owned));
-    keychain_key.or_else(env_api_key)
+        .map_err(|_| "Jev 凭据缓存不可用".to_owned())?
+        .get_or_load(read_keychain_key)
+        .map(|key| key.map(str::to_owned));
+    match keychain_key {
+        Ok(key) => Ok(key.or_else(env_api_key)),
+        Err(error) => env_api_key().map(Some).ok_or(error),
+    }
 }
 
-pub fn has_api_key() -> bool {
-    let keychain_available = CREDENTIAL_CACHE
-        .lock()
-        .ok()
-        .and_then(|mut cache| cache.get_or_load(read_keychain_key).map(|_| ()))
-        .is_some();
-    keychain_available || env_api_key().is_some()
+pub fn has_api_key() -> Result<bool, String> {
+    get_api_key().map(|key| key.is_some())
 }
 
 pub fn set_api_key(key: &str) -> Result<(), String> {
@@ -184,25 +212,25 @@ pub fn set_api_key(key: &str) -> Result<(), String> {
         .lock()
         .map_err(|_| "Jev 凭据缓存不可用".to_owned())?;
     let entry = Entry::new(SERVICE_NAME, KEYRING_USER)
-        .map_err(|error| format!("无法访问系统安全凭据服务：{error}"))?;
+        .map_err(|_| "无法访问系统安全凭据服务".to_owned())?;
     entry
         .set_password(trimmed)
-        .map_err(|error| format!("保存 API Key 失败：{error}"))?;
+        .map_err(|_| "保存 API Key 失败".to_owned())?;
     // A fresh entry must see the value. Without a native keyring backend,
     // keyring's mock accepts writes but loses them between Entry instances.
     let saved = match Entry::new(SERVICE_NAME, KEYRING_USER).and_then(|entry| entry.get_password())
     {
         Ok(saved) => saved,
         Err(_) => {
-            let _ = entry.delete_credential();
-            cache.replace(None);
-            return Err("系统凭据写入后无法重新读取，已取消保存".into());
+            cache.checked = true;
+            cache.unavailable = true;
+            return Err("系统凭据已写入，但读取校验失败；请允许钥匙串访问后测试连接".into());
         }
     };
     if saved != trimmed {
-        let _ = entry.delete_credential();
-        cache.replace(None);
-        return Err("系统凭据写入校验失败，已取消保存".into());
+        cache.checked = true;
+        cache.unavailable = true;
+        return Err("系统凭据写入校验失败，请测试连接后重试".into());
     }
     cache.replace(Some(saved));
     Ok(())
@@ -213,13 +241,13 @@ pub fn delete_api_key() -> Result<(), String> {
         .lock()
         .map_err(|_| "Jev 凭据缓存不可用".to_owned())?;
     let entry = Entry::new(SERVICE_NAME, KEYRING_USER)
-        .map_err(|error| format!("无法访问系统安全凭据服务：{error}"))?;
+        .map_err(|_| "无法访问系统安全凭据服务".to_owned())?;
     match entry.delete_credential() {
         Ok(_) | Err(keyring::Error::NoEntry) => {
             cache.replace(None);
             Ok(())
         }
-        Err(error) => Err(format!("删除 API Key 失败：{error}")),
+        Err(_) => Err("删除 API Key 失败".into()),
     }
 }
 
@@ -308,7 +336,7 @@ pub async fn verify_key(key: &str) -> Result<u64, String> {
 }
 
 pub async fn test_connection() -> Result<u64, String> {
-    let key = get_api_key().ok_or_else(|| "未配置 API Key".to_owned())?;
+    let key = get_api_key()?.ok_or_else(|| "未配置 API Key".to_owned())?;
     verify_key(&key).await
 }
 
@@ -316,7 +344,7 @@ pub async fn decide(input: JevInput) -> Result<String, String> {
     if !input.valid() {
         return Err("Invalid Jev input".into());
     }
-    let key = get_api_key().ok_or_else(|| "Jev API key unavailable".to_owned())?;
+    let key = get_api_key()?.ok_or_else(|| "Jev API key unavailable".to_owned())?;
     send_jev_request(&input, &key).await
 }
 
@@ -331,28 +359,37 @@ mod tests {
         let mut cache = CredentialCache {
             checked: false,
             key: None,
+            unavailable: false,
         };
         assert_eq!(
-            cache.get_or_load(|| {
-                reads.set(reads.get() + 1);
-                Some("synthetic-test-key".to_owned())
-            }),
+            cache
+                .get_or_load(|| {
+                    reads.set(reads.get() + 1);
+                    Ok(Some("synthetic-test-key".to_owned()))
+                })
+                .unwrap(),
             Some("synthetic-test-key")
         );
         assert_eq!(
-            cache.get_or_load(|| panic!("unexpected Keychain read")),
+            cache
+                .get_or_load(|| panic!("unexpected Keychain read"))
+                .unwrap(),
             Some("synthetic-test-key")
         );
         assert_eq!(reads.get(), 1);
 
         cache.replace(Some("replacement-test-key".to_owned()));
         assert_eq!(
-            cache.get_or_load(|| panic!("unexpected Keychain read")),
+            cache
+                .get_or_load(|| panic!("unexpected Keychain read"))
+                .unwrap(),
             Some("replacement-test-key")
         );
         cache.replace(None);
         assert_eq!(
-            cache.get_or_load(|| panic!("unexpected Keychain read")),
+            cache
+                .get_or_load(|| panic!("unexpected Keychain read"))
+                .unwrap(),
             None
         );
     }
@@ -363,19 +400,74 @@ mod tests {
         let mut cache = CredentialCache {
             checked: false,
             key: None,
+            unavailable: false,
         };
         assert_eq!(
-            cache.get_or_load(|| {
-                reads.set(reads.get() + 1);
-                None
-            }),
+            cache
+                .get_or_load(|| {
+                    reads.set(reads.get() + 1);
+                    Ok(None)
+                })
+                .unwrap(),
             None
         );
         assert_eq!(
-            cache.get_or_load(|| panic!("unexpected Keychain read")),
+            cache
+                .get_or_load(|| panic!("unexpected Keychain read"))
+                .unwrap(),
             None
         );
         assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
+    fn denied_keychain_access_can_recover_without_repasting_or_repeated_prompts() {
+        let mut cache = CredentialCache {
+            checked: false,
+            key: None,
+            unavailable: false,
+        };
+        let error = cache
+            .get_or_load(|| Err("synthetic-sensitive-error".into()))
+            .unwrap_err();
+        assert!(!error.contains("synthetic-sensitive-error"));
+        assert!(
+            cache
+                .get_or_load(|| panic!("must not prompt repeatedly"))
+                .is_err()
+        );
+        cache.retry_unavailable();
+        assert_eq!(
+            cache
+                .get_or_load(|| Ok(Some("synthetic-saved-key".into())))
+                .unwrap(),
+            Some("synthetic-saved-key")
+        );
+        cache.retry_unavailable();
+        assert_eq!(
+            cache
+                .get_or_load(|| panic!("healthy cache must be retained"))
+                .unwrap(),
+            Some("synthetic-saved-key")
+        );
+    }
+
+    #[test]
+    fn new_process_cache_restores_previously_saved_credentials() {
+        let saved = "synthetic-persisted-key";
+        for _ in 0..2 {
+            let mut process_cache = CredentialCache {
+                checked: false,
+                key: None,
+                unavailable: false,
+            };
+            assert_eq!(
+                process_cache
+                    .get_or_load(|| Ok(Some(saved.into())))
+                    .unwrap(),
+                Some(saved)
+            );
+        }
     }
 
     #[test]

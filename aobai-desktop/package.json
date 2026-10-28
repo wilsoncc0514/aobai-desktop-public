@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "node scripts/check-public-assets.mjs && vue-tsc --noEmit && vite build && node scripts/check-public-assets.mjs --copy",
     "bundle": "sh scripts/build-release.sh",
     "bundle:candidate": "sh scripts/build-release.sh --candidate",
     "test": "vitest run",
@@ -17,7 +17,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.10.0",
     "@tauri-apps/plugin-autostart": "^2.5.0",
-    "vue": "^3.5.32"
+    "vue": "^3.5.43"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.10.0",
@@ -25,7 +25,7 @@
     "@vue/tsconfig": "^0.7.0",
     "typescript": "^5.9.3",
     "vite": "^6.4.2",
-    "vitest": "^3.2.4",
+    "vitest": "^4.1.11",
     "vue-tsc": "^2.2.12"
   }
 }

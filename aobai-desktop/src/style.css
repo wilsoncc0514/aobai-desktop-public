@@ -62,20 +62,50 @@ body,
   text-align: center;
 }
 
-.mode-indicator {
-  position: absolute;
-  right: 9px;
-  bottom: 7px;
-  padding: 3px 7px;
-  border-radius: 999px;
-  color: rgba(52, 37, 29, 0.68);
-  background: rgba(255, 250, 242, 0.72);
-  font-size: 10px;
-  pointer-events: none;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .pet-image {
     transition: none;
   }
+}
+
+.codex-reminder {
+  position: absolute;
+  z-index: 5;
+  top: 14px;
+  left: 7px;
+  right: 7px;
+  display: flex;
+  align-items: flex-start;
+  border: 1.5px solid #554838;
+  border-radius: 18px 18px 17px 20px;
+  background: #fffdf6;
+  box-shadow: 0 3px 0 #55483818;
+  color: #3e3428;
+}
+.codex-reminder::after {
+  content: "";
+  position: absolute;
+  left: 61%;
+  bottom: -9px;
+  width: 13px;
+  height: 14px;
+  background: #fffdf6;
+  border-right: 1.5px solid #554838;
+  border-bottom: 1.5px solid #554838;
+  transform: skewY(25deg) rotate(26deg);
+  border-radius: 0 0 3px 0;
+  pointer-events: none;
+}
+.codex-reminder button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+.codex-open { flex: 1; min-width: 0; padding: 10px 2px 10px 12px; text-align: left; overflow-wrap: anywhere; }
+.codex-label { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12px; font-weight: 600; line-height: 1.45; }
+.codex-open small { display: block; margin-top: 3px; font-size: 10px; line-height: 1.35; color: #766751; }
+.codex-project { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.codex-dismiss { min-width: 28px; min-height: 28px; padding: 4px 7px; font-size: 16px !important; }
+.codex-reminder button:focus-visible { outline: 2px solid #976c2b; outline-offset: -3px; border-radius: 14px; }
+
+.codex-reminder { opacity: 1; transition: opacity 300ms ease-out; }
+.codex-reminder.is-fading { opacity: 0; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) {
+  .codex-reminder { transition: none; }
 }

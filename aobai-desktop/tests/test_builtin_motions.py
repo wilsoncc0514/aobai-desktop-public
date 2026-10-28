@@ -97,16 +97,25 @@ class BuiltinMotionTests(unittest.TestCase):
                 enter_rgba = enter.convert("RGBA")
                 exit_rgba = exit_atlas.convert("RGBA")
                 self.assertEqual(enter_rgba.crop((0, 0, size, size)).tobytes(), idle_rest)
-                self.assertEqual(enter_rgba.crop((3 * size, size, 4 * size, 2 * size)).tobytes(), sleep_rest)
+                last = len(manifest['clips']['sleep-enter']['durations'])-1
+                columns = manifest['clips']['sleep-enter']['columns']
+                x,y = last%columns*size,last//columns*size
+                self.assertEqual(enter_rgba.crop((x,y,x+size,y+size)).tobytes(), sleep_rest)
                 self.assertEqual(exit_rgba.crop((0, 0, size, size)).tobytes(), sleep_rest)
-                self.assertEqual(exit_rgba.crop((3 * size, size, 4 * size, 2 * size)).tobytes(), idle_rest)
+                last = len(manifest['clips']['sleep-exit']['durations'])-1
+                columns = manifest['clips']['sleep-exit']['columns']
+                x,y = last%columns*size,last//columns*size
+                self.assertEqual(exit_rgba.crop((x,y,x+size,y+size)).tobytes(), idle_rest)
 
     def test_belly_recovery_and_idle_rest_are_the_same_pixels(self):
         root = MOTION_ROOT
+        clip = json.loads((root/'manifest.json').read_text())['clips']['belly']
         for density, suffix in ((1, ""), (2, "@2x")):
             size = 208 * density
             with Image.open(root / f"belly{suffix}.webp") as belly, Image.open(root / f"idle{suffix}.webp") as idle:
-                rest = belly.convert("RGBA").crop((4 * size, 3 * size, 5 * size, 4 * size))
+                last = len(clip['durations'])-1
+                x,y = last%clip['columns']*size,last//clip['columns']*size
+                rest = belly.convert("RGBA").crop((x,y,x+size,y+size))
                 self.assertEqual(idle.convert("RGBA").crop((0, 0, size, size)).tobytes(), rest.tobytes())
                 self.assertEqual(idle.convert("RGBA").crop((3 * size, 2 * size, 4 * size, 3 * size)).tobytes(), rest.tobytes())
 
@@ -171,12 +180,13 @@ class BuiltinMotionTests(unittest.TestCase):
 
     def test_sleep_transition_orientation_is_consistent_and_monotonic(self):
         root = MOTION_ROOT
+        count = len(json.loads((root / 'manifest.json').read_text())['clips']['sleep-enter']['durations'])
         for density, suffix in ((1, ""), (2, "@2x")):
             size = 208 * density
             with Image.open(root / f"sleep-enter{suffix}.webp") as enter_img:
                 alpha = enter_img.convert("RGBA").getchannel("A")
                 prev_top = 0
-                for i in range(8):
+                for i in range(count):
                     c = i % 4
                     r = i // 4
                     cell_a = alpha.crop((c * size, r * size, (c + 1) * size, (r + 1) * size))
@@ -190,11 +200,12 @@ class BuiltinMotionTests(unittest.TestCase):
 
     def test_groom_forehead_has_no_pink_artifacts(self):
         root = MOTION_ROOT
+        count = len(json.loads((root / 'manifest.json').read_text())['clips']['waving']['durations'])
         for density, suffix in ((1, ""), (2, "@2x")):
             size = 208 * density
             with Image.open(root / f"groom{suffix}.webp") as groom_img:
                 arr = np.array(groom_img.convert("RGBA"))
-                for i in range(16):
+                for i in range(count):
                     c = i % 4
                     r = i // 4
                     cell = arr[r * size:(r + 1) * size, c * size:(c + 1) * size]
@@ -202,6 +213,62 @@ class BuiltinMotionTests(unittest.TestCase):
                     forehead = cell[:int(70 * density), :]
                     pink_artifact = (forehead[:, :, 3] > 50) & (forehead[:, :, 0] > 200) & (forehead[:, :, 1] < 160) & (forehead[:, :, 2] > 130) & (forehead[:, :, 0] - forehead[:, :, 1] > 50)
                     self.assertEqual(int(np.sum(pink_artifact)), 0, f"groom frame {i} has pink forehead artifact at {density}x")
+
+    def test_groom_whiskers_and_paw_are_not_recolored_as_tongue(self):
+        # The old mouth rectangle recolored dark whisker/paw pixels at x>=109.
+        # The real tongue is to its left; preserve it rather than banning pink
+        # everywhere (which would also erase normal nose/ear/tongue colors).
+        body_start, body_end, _ = json.loads((MOTION_ROOT / 'manifest.json').read_text())['clips']['waving']['repeat']
+        for density, suffix in ((1, ""), (2, "@2x")):
+            size = 208 * density
+            with Image.open(MOTION_ROOT / f"groom{suffix}.webp") as image:
+                atlas = np.asarray(image.convert("RGBA"), dtype=np.int16)
+                for i in range(body_start, body_end + 1):
+                    frame = atlas[i // 4 * size:(i // 4 + 1) * size,
+                                  i % 4 * size:(i % 4 + 1) * size]
+                    region = frame[70 * density:90 * density, 109 * density:125 * density]
+                    pink = ((region[:, :, 3] > 120) & (region[:, :, 0] > 180)
+                            & (region[:, :, 0] - region[:, :, 1] > 50)
+                            & (region[:, :, 2] > 120))
+                    self.assertEqual(int(pink.sum()), 0, f"groom {i} has pink whisker/paw artifacts at {density}x")
+
+    def test_retina_transition_edges_have_antialiased_alpha(self):
+        # Catch opaque-to-transparent cutout borders, especially the stretched
+        # belly/feet/tail. This is an edge gate, not a substitute for fur QA.
+        manifest = json.loads((MOTION_ROOT / "manifest.json").read_text())
+        for name in ("waving", "review", "running", "belly", "sleep-enter", "sleep-exit"):
+            clip = manifest["clips"][name]
+            size = 416
+            with Image.open(MOTION_ROOT / clip["file2x"]) as image:
+                alpha = np.asarray(image.getchannel("A"), dtype=np.int16)
+                for i in range(len(clip["durations"])):
+                    cell = alpha[i // clip["columns"] * size:(i // clip["columns"] + 1) * size,
+                                 i % clip["columns"] * size:(i % clip["columns"] + 1) * size]
+                    hard = int((abs(np.diff(cell, axis=0)) > 200).sum()
+                               + (abs(np.diff(cell, axis=1)) > 200).sum())
+                    self.assertEqual(hard, 0, f"{name} {i} has {hard} hard alpha cutouts at 2x")
+
+    def test_stretch_tail_tips_are_not_vertical_source_crop_edges(self):
+        count = len(json.loads((MOTION_ROOT/'manifest.json').read_text())['clips']['review']['durations'])
+        for density, suffix in ((1, ""), (2, "@2x")):
+            size = 208 * density
+            with Image.open(MOTION_ROOT / f"stretch{suffix}.webp") as image:
+                alpha = np.asarray(image.getchannel("A"))
+                for i in range(count-5,count-2):
+                    cell = alpha[i // 4 * size:(i // 4 + 1) * size,
+                                 i % 4 * size:(i % 4 + 1) * size]
+                    # The severed source tails had 40–48 logical pixels of
+                    # perfectly vertical right edge. Complete curved tips
+                    # should not retain that long rectangular crop signature.
+                    previous, run, longest = -1, 0, 0
+                    for row in cell[:105 * density, 155 * density:]:
+                        xs = np.flatnonzero(row > 32)
+                        right = int(xs[-1]) if len(xs) else -1
+                        run = run + 1 if right == previous and right >= 0 else int(right >= 0)
+                        longest = max(longest, run)
+                        previous = right
+                    self.assertLess(longest, 25 * density,
+                                    f"stretch {i} has a vertical cropped tail at {density}x")
 
 
 if __name__ == "__main__":

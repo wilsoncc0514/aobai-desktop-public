@@ -12,6 +12,7 @@
     "core:window:allow-set-always-on-bottom",
     "core:window:allow-set-always-on-top",
     "core:window:allow-show",
+    "core:window:allow-set-focus",
     "core:window:allow-start-dragging",
     "autostart:allow-disable",
     "autostart:allow-enable",

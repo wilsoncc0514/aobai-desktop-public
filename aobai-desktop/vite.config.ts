@@ -11,6 +11,9 @@ export default defineConfig({
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {
+    // The runtime serves builtin atlases; public/pet is a local legacy cache.
+    // Copy approved runtime assets explicitly after Vite finishes.
+    copyPublicDir: false,
     target: "safari13",
     minify: "esbuild",
     sourcemap: false,

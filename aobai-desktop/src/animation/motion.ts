@@ -31,15 +31,19 @@ export class MotionPlayer {
 
   get isHeld(): boolean { return this.held; }
 
+  /** Pending user intent owns the next handoff even during an idle tail loop. */
+  get isResting(): boolean { return this.action === "idle" && !this.held && this.pending === null; }
+
   get snapshot() {
     const duration = this.clips[this.action]!.durations[this.frame]!;
-    return { action: this.action, frame: this.frame,
-      duration: this.pending !== null ? Math.min(duration, 120) : duration };
+    // Queuing can end body repetition, but must not rush weight shifts,
+    // breathing, or the seated pause that separates two actions.
+    return { action: this.action, frame: this.frame, duration };
   }
 
   request(action: MotionAction): void {
     if (this.held || this.action === "belly" || !this.clips[action]) return;
-    if (this.action === "idle") this.start(action);
+    if (this.atIdleRest()) this.start(action);
     else this.pending = action;
   }
 
@@ -51,7 +55,7 @@ export class MotionPlayer {
       if (loop && this.frame > loop[1]) this.pending = action;
       return;
     }
-    if (this.action === "idle") this.start(action);
+    if (this.atIdleRest()) this.start(action);
     else this.pending = action;
   }
 
@@ -60,6 +64,11 @@ export class MotionPlayer {
   settle(): void {
     this.held = false;
     this.pending = this.action === "idle" ? null : "idle";
+  }
+
+  private atIdleRest(): boolean {
+    return this.action === "idle" &&
+      (this.frame === 0 || this.frame === this.clips.idle!.durations.length - 1);
   }
 
   reset(): void {
@@ -89,6 +98,13 @@ export class MotionPlayer {
       this.frame++;
     } else {
       const next = this.pending ?? (clip.loop ? this.action : "idle");
+      // Sleep owns a lying endpoint. Wake before handing off to a sitting clip;
+      // keep the latest intent and held state while the recovery plays.
+      if (this.pending !== null && this.clips["sleep-exit"] &&
+          (this.action === "sleep" || this.action === "sleep-enter")) {
+        this.start("sleep-exit");
+        return;
+      }
       this.pending = null;
       this.start(next);
     }

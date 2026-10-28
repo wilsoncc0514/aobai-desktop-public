@@ -20,6 +20,28 @@ function advance(player: MotionPlayer, session: SleepSession): void {
 }
 
 describe("bounded sleep sessions", () => {
+  it("keeps a requested sleep session while idle finishes its visible gesture", () => {
+    const session = new SleepSession();
+    const player = new MotionPlayer({ ...library, idle: { durations: [100, 100, 100], loop: true } });
+    player.advance(); session.start(0, true); player.request("sleep-enter");
+    advance(player, session);
+    expect(session.snapshot.phase).toBe("entering");
+    advance(player, session);
+    expect(player.snapshot.action).toBe("sleep-enter");
+    advance(player, session); advance(player, session);
+    expect(player.snapshot.action).toBe("sleep");
+    expect(session.snapshot.phase).toBe("sleeping");
+  });
+  it("also bounds sleep without transitions when it waited for idle recovery", () => {
+    const session = new SleepSession();
+    const player = new MotionPlayer({ ...library, idle: { durations: [100,100,100], loop: true } });
+    player.advance(); session.start(0); player.request("sleep");
+    advance(player, session); advance(player, session);
+    expect(player.snapshot.action).toBe("sleep");
+    for (let i=0;i<4;i++) advance(player, session);
+    expect(player.snapshot.action).toBe("idle");
+    expect(session.snapshot.active).toBe(false);
+  });
   it.each([
     [0, 2],
     [0.199999, 2],

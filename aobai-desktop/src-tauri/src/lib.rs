@@ -1,3 +1,4 @@
+mod codex;
 mod jev;
 mod settings;
 mod skins;
@@ -6,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use settings::{DesktopSettings, load_from_path, save_to_path};
 use std::sync::Mutex;
 use tauri::{
-    AppHandle, Emitter, Manager,
-    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
+    AppHandle, Manager,
+    menu::{Menu, MenuItem},
     path::BaseDirectory,
     tray::TrayIconBuilder,
 };
@@ -106,10 +107,12 @@ fn scan_skins(app: AppHandle) -> Result<skins::SkinScanResult, String> {
     Ok(result)
 }
 
-#[tauri::command]
-fn get_jev_status(app: AppHandle) -> Result<JevStatus, String> {
+fn read_jev_status(app: AppHandle, retry_unavailable: Option<bool>) -> Result<JevStatus, String> {
     let settings = load_settings(app)?;
-    let configured = jev::has_api_key();
+    if retry_unavailable.unwrap_or(false) {
+        jev::retry_unavailable_credentials()?;
+    }
+    let configured = jev::has_api_key()?;
     let enabled = effective_jev_enabled(settings.jev_enabled, env_jev_requested(), configured);
     Ok(JevStatus {
         configured,
@@ -118,14 +121,25 @@ fn get_jev_status(app: AppHandle) -> Result<JevStatus, String> {
 }
 
 #[tauri::command]
+async fn get_jev_status(
+    app: AppHandle,
+    retry_unavailable: Option<bool>,
+) -> Result<JevStatus, String> {
+    // Keychain access can wait for OS authorization. Keep the GUI event loop free.
+    tauri::async_runtime::spawn_blocking(move || read_jev_status(app, retry_unavailable))
+        .await
+        .map_err(|_| "Jev 状态读取失败".to_owned())?
+}
+
+#[tauri::command]
 fn jev_set_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     let generation = next_credential_generation()?;
     with_current_credential_generation(generation, || {
         let mut settings = load_settings(app.clone())?;
-        if enabled && !jev::has_api_key() {
+        if enabled && !jev::has_api_key()? {
             return Err("未配置 API Key，无法启用 Jev 决策".into());
         }
-        if !enabled && env_jev_requested() && jev::has_api_key() {
+        if !enabled && env_jev_requested() && jev::has_api_key()? {
             return Err("开发环境变量正在启用 Jev；取消变量并重启后才能关闭".into());
         }
         settings.jev_enabled = enabled;
@@ -176,8 +190,8 @@ fn jev_delete_key(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn behavior_provider(app: AppHandle) -> Result<String, String> {
-    if get_jev_status(app)?.enabled {
+async fn behavior_provider(app: AppHandle) -> Result<String, String> {
+    if get_jev_status(app, None).await?.enabled {
         Ok("jev".to_owned())
     } else {
         Ok("rule".to_owned())
@@ -186,71 +200,55 @@ fn behavior_provider(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 async fn jev_decide(app: AppHandle, input: jev::JevInput) -> Result<String, String> {
-    if behavior_provider(app)? != "jev" {
+    if behavior_provider(app).await? != "jev" {
         return Err("Jev provider is disabled".into());
     }
     jev::decide(input).await
 }
 
+#[tauri::command]
+fn get_codex_status(service: tauri::State<'_, codex::Service>) -> codex::Snapshot {
+    service.snapshot()
+}
+#[tauri::command]
+fn codex_set_enabled(
+    app: AppHandle,
+    service: tauri::State<'_, codex::Service>,
+    enabled: bool,
+) -> Result<codex::Snapshot, String> {
+    service.set_enabled(&app, enabled)
+}
+#[tauri::command]
+fn codex_refresh(app: AppHandle, service: tauri::State<'_, codex::Service>) {
+    service.refresh(&app);
+}
+#[tauri::command]
+fn codex_acknowledge(
+    app: AppHandle,
+    service: tauri::State<'_, codex::Service>,
+    key: String,
+) -> Result<(), String> {
+    service.acknowledge(&app, &key)
+}
+#[tauri::command]
+async fn codex_open_task(
+    app: AppHandle,
+    service: tauri::State<'_, codex::Service>,
+    id: String,
+) -> Result<(), String> {
+    let service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || service.open(&app, &id))
+        .await
+        .map_err(|_| "打开任务失败".to_owned())?
+}
+
 fn install_tray(app: &tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "显示鳌拜", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "隐藏鳌拜", true, None::<&str>)?;
-    let quiet = MenuItem::with_id(app, "mode-quiet", "安静", true, None::<&str>)?;
-    let normal = MenuItem::with_id(app, "mode-normal", "普通", true, None::<&str>)?;
-    let active = MenuItem::with_id(app, "mode-active", "活跃", true, None::<&str>)?;
-    let behavior = Submenu::with_items(app, "行为", true, &[&quiet, &normal, &active])?;
-    let layer_top = MenuItem::with_id(app, "layer-top", "置顶", true, None::<&str>)?;
-    let layer_normal = MenuItem::with_id(app, "layer-normal", "普通", true, None::<&str>)?;
-    let layer_bottom = MenuItem::with_id(app, "layer-bottom", "置底", true, None::<&str>)?;
-    let layer = Submenu::with_items(
-        app,
-        "层级",
-        true,
-        &[&layer_top, &layer_normal, &layer_bottom],
-    )?;
-    let reset = MenuItem::with_id(app, "reset-position", "重置位置", true, None::<&str>)?;
-    let window = Submenu::with_items(app, "窗口", true, &[&layer, &reset])?;
-    let reload = MenuItem::with_id(app, "reload-skins", "重新扫描 skin", true, None::<&str>)?;
-    let scanned = skins::skin_root()
-        .map(|root| skins::scan(&root))
-        .unwrap_or_else(|_| skins::SkinScanResult {
-            root_path: String::new(),
-            skins: Vec::new(),
-            warnings: Vec::new(),
-        });
-    let skin_items = scanned
-        .skins
-        .iter()
-        .map(|skin| {
-            MenuItem::with_id(
-                app,
-                format!("skin:{}", skin.id),
-                &skin.display_name,
-                true,
-                None::<&str>,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut appearance_items: Vec<&dyn tauri::menu::IsMenuItem<_>> = skin_items
-        .iter()
-        .map(|item| item as &dyn tauri::menu::IsMenuItem<_>)
-        .collect();
-    appearance_items.push(&reload);
-    let appearance = Submenu::with_items(app, "外观", true, &appearance_items)?;
-    let separator = PredefinedMenuItem::separator(app)?;
+    // A minimal recovery menu is available before the webview has loaded.
+    // The webview replaces it with the shared pet context menu and live checkmarks.
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &show,
-            &hide,
-            &appearance,
-            &window,
-            &behavior,
-            &separator,
-            &quit,
-        ],
-    )?;
+    let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
 
     TrayIconBuilder::with_id("main")
@@ -274,51 +272,6 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
                         eprintln!("failed to hide main window: {error}");
                     }
                 }
-                "mode-quiet" => {
-                    if let Err(error) = window.emit("tray-mode", "quiet") {
-                        eprintln!("failed to emit quiet mode: {error}");
-                    }
-                }
-                "mode-normal" => {
-                    if let Err(error) = window.emit("tray-mode", "normal") {
-                        eprintln!("failed to emit normal mode: {error}");
-                    }
-                }
-                "mode-active" => {
-                    if let Err(error) = window.emit("tray-mode", "active") {
-                        eprintln!("failed to emit active mode: {error}");
-                    }
-                }
-                "layer-top" => {
-                    if let Err(error) = window.emit("tray-layer", "top") {
-                        eprintln!("failed to emit top layer: {error}");
-                    }
-                }
-                "layer-normal" => {
-                    if let Err(error) = window.emit("tray-layer", "normal") {
-                        eprintln!("failed to emit normal layer: {error}");
-                    }
-                }
-                "layer-bottom" => {
-                    if let Err(error) = window.emit("tray-layer", "bottom") {
-                        eprintln!("failed to emit bottom layer: {error}");
-                    }
-                }
-                "reset-position" => {
-                    if let Err(error) = window.center() {
-                        eprintln!("failed to center main window: {error}");
-                    }
-                }
-                "reload-skins" => {
-                    if let Err(error) = window.emit("tray-reload-skins", ()) {
-                        eprintln!("failed to request skin reload: {error}");
-                    }
-                }
-                id if id.starts_with("skin:") => {
-                    if let Err(error) = window.emit("tray-skin", &id[5..]) {
-                        eprintln!("failed to switch tray skin: {error}");
-                    }
-                }
                 "quit" => app.exit(0),
                 _ => {}
             }
@@ -329,7 +282,17 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        if let Some(window) = app.get_webview_window("main")
+            && let Err(error) = window.show()
+        {
+            eprintln!("failed to show existing main window: {error}");
+        }
+    }));
+    builder
+        .manage(codex::Service::default())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
@@ -344,17 +307,37 @@ pub fn run() {
             jev_set_enabled,
             jev_verify_and_save_key,
             jev_test_connection,
-            jev_delete_key
+            jev_delete_key,
+            get_codex_status,
+            codex_set_enabled,
+            codex_refresh,
+            codex_acknowledge,
+            codex_open_task
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.handle()
                 .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
             install_tray(app)?;
+            if app
+                .state::<codex::Service>()
+                .configure(app.handle())
+                .is_err()
+            {
+                eprintln!("Codex follow settings unavailable; monitoring remains disabled");
+            }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("fatal error while running Aobai desktop pet");
+        .build(tauri::generate_context!())
+        .expect("fatal error while building Aobai desktop pet")
+        .run(|app, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
+            ) {
+                app.state::<codex::Service>().stop();
+            }
+        });
 }
 
 #[cfg(test)]

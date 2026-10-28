@@ -13,13 +13,56 @@ const library: MotionLibrary = {
 };
 
 describe("single-owner motion controller", () => {
-  it.each([["waving", 8970], ["running", 12420]] as const)(
-    "bundled %s lasts exactly three times its previous duration", (action, expected) => {
+  it("does not classify an idle loop with queued user intent as ambient rest", () => {
+    const player = new MotionPlayer({ ...library, idle: { durations: [100, 100, 100], loop: true } });
+    expect(player.isResting).toBe(true);
+    player.advance(); player.request("waving");
+    expect(player.snapshot.action).toBe("idle");
+    expect(player.isResting).toBe(false);
+    player.reset(); player.press();
+    expect(player.isResting).toBe(false);
+    player.reset();
+    expect(player.isResting).toBe(true);
+  });
+  it("finishes a visible idle tail/blink before starting another sitting clip", () => {
+    const player = new MotionPlayer({ ...library, idle: {
+      durations: [5000, 200, 100, 3000], loop: true,
+    } });
+    player.advance(); player.request("waving");
+    expect(player.snapshot).toMatchObject({ action: "idle", frame: 1, duration: 200 });
+    player.advance(); player.advance();
+    expect(player.snapshot).toMatchObject({ action: "idle", frame: 3 });
+    player.advance();
+    expect(player.snapshot).toMatchObject({ action: "waving", frame: 0 });
+  });
+  it.each(["sleep", "sleep-enter"] as const)("wakes from %s before queued petting", (action) => {
+    const player = new MotionPlayer(library);
+    player.replace(action); player.advance(); player.press();
+    player.advance();
+    expect(player.snapshot).toMatchObject({ action: "sleep-exit", frame: 0 });
+    expect(player.isHeld).toBe(true);
+    player.advance(); player.advance();
+    expect(player.snapshot).toMatchObject({ action: "belly", frame: 0 });
+  });
+  it("settles sleep through recovery and uses the latest requested action", () => {
+    const player = new MotionPlayer({ ...library, review: { durations: [100] } });
+    player.replace("sleep"); player.settle(); player.request("waving");
+    player.advance(); player.advance();
+    expect(player.snapshot.action).toBe("sleep-exit");
+    player.request("review"); player.advance(); player.advance();
+    expect(player.snapshot.action).toBe("review");
+  });
+  it.each([["waving", 6620], ["running", 10480]] as const)(
+    "bundled %s keeps its body rhythm while entry and recovery have their own time", (action, expected) => {
+      const clip = validateMotionManifest(manifest).clips[action]!;
       const player = new MotionPlayer(validateMotionManifest(manifest).clips);
       player.request(action);
       let elapsed = 0;
       for (let i = 0; player.snapshot.action !== "idle" && i < 500; i++) {
-        elapsed += player.snapshot.duration; player.advance();
+        if (player.snapshot.frame >= clip.repeat![0] && player.snapshot.frame <= clip.repeat![1]) {
+          elapsed += player.snapshot.duration;
+        }
+        player.advance();
       }
       expect(player.snapshot.action).toBe("idle");
       expect(elapsed).toBeCloseTo(expected, 6);
@@ -69,7 +112,7 @@ describe("single-owner motion controller", () => {
     player.request("waving"); player.advance(); player.press();
     player.request("running-left"); player.request("waving");
     expect(player.snapshot.action).toBe("waving");
-    expect(player.snapshot.duration).toBeLessThanOrEqual(120);
+    expect(player.snapshot.duration).toBe(500);
     player.advance(); player.advance();
     expect(player.snapshot.action).toBe("belly");
   });
@@ -79,6 +122,34 @@ describe("single-owner motion controller", () => {
     for (let i = 0; i < 20; i++) player.advance();
     expect(player.snapshot.action).toBe("idle");
     expect(player.isHeld).toBe(false);
+  });
+  it.each(["request", "press", "settle"] as const)(
+    "%s preserves every remaining stretch hold and recovery duration", (intent) => {
+      const clips = validateMotionManifest(manifest).clips;
+      const player = new MotionPlayer(clips);
+      player.request("review");
+      for (let i = 0; i < 10; i++) player.advance();
+      if (intent === "request") player.request("waving");
+      else player[intent]();
+      for (let frame = 10; frame < clips.review!.durations.length; frame++) {
+        expect(player.snapshot).toMatchObject({ action: "review", frame,
+          duration: clips.review!.durations[frame] });
+        player.advance();
+      }
+      expect(player.snapshot.action).toBe(intent === "request" ? "waving" : intent === "press" ? "belly" : "idle");
+    });
+  it("waking preserves the breathing interval and the seated recovery pause", () => {
+    const clips = validateMotionManifest(manifest).clips;
+    const player = new MotionPlayer(clips);
+    player.replace("sleep"); player.press();
+    expect(player.snapshot.duration).toBe(900);
+    for (let i = 0; i < clips.sleep!.durations.length; i++) player.advance();
+    expect(player.snapshot.action).toBe("sleep-exit");
+    for (const duration of clips["sleep-exit"]!.durations) {
+      expect(player.snapshot.duration).toBe(duration);
+      player.advance();
+    }
+    expect(player.snapshot.action).toBe("belly");
   });
   it("pressing during recovery completes the return then starts a new held roll", () => {
     const player = new MotionPlayer(library);
@@ -95,13 +166,15 @@ describe("single-owner motion controller", () => {
     player.press();
     expect(player.snapshot.action).toBe("waiting");
   });
-  it("loops sleep until an interaction queues the existing belly flow", () => {
+  it("loops sleep until an interaction queues waking then the belly flow", () => {
     const player = new MotionPlayer(library);
     player.request("sleep");
     player.advance(); player.advance(); player.advance();
     expect(player.snapshot.action).toBe("sleep");
     player.press();
     player.advance();
+    expect(player.snapshot.action).toBe("sleep-exit");
+    player.advance(); player.advance();
     expect(player.snapshot.action).toBe("belly");
   });
   it("replaces a bounded transition immediately and clears queued intent", () => {
@@ -174,11 +247,19 @@ describe("bounded variable-frame motion assets", () => {
   it.each(["sleep-enter", "sleep-exit"] as const)("registers bounded %s transition", (action) => {
     const clip = validateMotionManifest(manifest).clips[action];
     expect(clip).toMatchObject({ columns: 4 });
-    expect(clip?.durations).toHaveLength(8);
+    expect(clip?.durations).toHaveLength(14);
+    expect(clip!.durations.reduce((sum, duration) => sum + duration, 0)).toBeGreaterThanOrEqual(3500);
+    expect(clip!.durations.every((duration) => duration >= 150)).toBe(true);
     expect(clip?.loop).toBeUndefined();
     expect(clip?.heldLoop).toBeUndefined();
     expect(clip?.repeat).toBeUndefined();
   });
+  it.each(["belly", "waving", "running", "review", "sleep-exit"] as const)(
+    "%s gives visible transitions time and settles before the next action", (action) => {
+      const clip = validateMotionManifest(manifest).clips[action]!;
+      expect(Math.min(...clip.durations)).toBeGreaterThanOrEqual(110);
+      expect(clip.durations[clip.durations.length - 1]).toBeGreaterThanOrEqual(600);
+    });
   it.each([[0, 2, 3], [2, 1, 3], [1, 3, 3], [1, 2, 0], [1, 2, 33],
     [1, 2, 2.5], [1, 2], [1, 2, Number.NaN]])("rejects invalid body repeat %j", (...repeat) => {
     expect(() => validateMotionManifest({ version: 1, size: 208, clips: { waving: {

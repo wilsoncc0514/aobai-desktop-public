@@ -86,7 +86,7 @@ describe("Jev context menu integration", () => {
     const items = getJevSubmenu({ configured: true, enabled: false, connected: false });
 
     const statusItem = items[0]!;
-    expect(statusItem.text).toBe("状态：未配置" === statusItem.text ? "状态：未配置" : "状态：未连接");
+    expect(statusItem.text).toBe("状态：连接失败");
     expect(statusItem.enabled).toBe(false);
 
     const toggleItem = items[1]!;
@@ -98,6 +98,22 @@ describe("Jev context menu integration", () => {
     expect(testItem.enabled).toBe(true);
     const deleteItem = items[4]!;
     expect(deleteItem.enabled).toBe(true);
+  });
+
+  it("distinguishes a saved credential awaiting verification from a missing key", () => {
+    const items = getJevSubmenu({ configured: true, enabled: true });
+    expect(items[0]!.text).toBe("状态：已配置，待验证");
+    expect(items[1]!.checked).toBe(true);
+    expect(items[2]!.text).toBe("从剪贴板粘贴 API Key");
+    expect(items[3]!.enabled).toBe(true);
+  });
+
+  it("offers a connection retry on credential access failure without enabling Jev", () => {
+    const items = getJevSubmenu({ configured: false, enabled: false, credentialError: true });
+    expect(items[0]!.text).toBe("状态：凭据读取失败");
+    expect(items[1]!.enabled).toBe(false);
+    expect(items[3]!.enabled).toBe(true);
+    expect(items[4]!.enabled).toBe(false);
   });
 
   it("dispatches expected actions when items are invoked", () => {
