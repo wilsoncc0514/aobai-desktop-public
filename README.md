@@ -1,29 +1,27 @@
 # 鳌拜·桌面宠物
 
-轻量、默认离线、无养成数值的桌面宠物，基于 Tauri 2、Vue 和 TypeScript。
+更新日期：2026-10-28。轻量Tauri 2 + Vue/TypeScript桌宠，程序元数据 **0.4.1**。本仓为独立历史的公开源码快照，不含原始参考照片、制作过程、记忆或私有交接。
 
-当前快照包含可选 Jev ambient 决策和 Codex 本地任务通知。程序版本元数据仍为 `0.4.1`，不是新的正式版本号。
+- 猫画布为 208×208；透明窗口为 208×272，头顶 64px 留给通知，不缩小猫。
+- 正面蹲坐、尾段拍地、翻肚皮、舔爪、踩奶、伸展与小盹；保留起势和收势，悬停不触发跑动，不自动巡航。
+- 按下互动、按住拖动，松手自然回坐；任务通知不强切身体动作。
+- 外观、动作（含 Jev）、窗口和行为集中在状态栏/系统托盘；右键鳌拜仅有 Codex 任务通知与暂时隐藏。
+- 通知气泡完整显示 4 秒，再以 0.3 秒渐隐；不自动标已读。新提醒重新计时，同一提醒不会因状态刷新反复弹出。
+- 可选 Codex 本地任务跟随默认关闭，区分主任务与子任务、进行中/待处理/完成/中断/未知；不显示或自动查询额度。
+- 默认本地规则；Jev 仅在用户明确启用后联网，选择已有行为，不生成动画帧。
+- 可选开机启动默认关闭；保留位置、活动模式、窗口层级及外部 v2 皮肤选择。
 
-Windows PowerShell 5.1 打包已在中文且含空格的路径中实机验证，包含原生命令失败注入；当前公开提交仍需在 Windows 重新执行完整构建和桌面 GUI 验收。CI 和打包通过不代表透明窗口、托盘、拖动、缩放等行为已经验收。
+## 使用与构建入口
 
-## 功能
-
-- 透明无边框的208×272窗口，猫画布仍为208×208，头顶为通知气泡留白，支持置顶、普通和置底层级。
-- 常态正面蹲坐，尾巴以左侧为固定支点、右侧整片尾段做更大幅度的抬落；按下翻肚皮撒娇，按住可拖动，松手收势回坐，悬停不触发。
-- 内置可变帧动作覆盖静坐、翻肚皮、舔爪、踩奶、猫式伸展，以及入睡、睡眠呼吸与苏醒；伸展与踩奶加入过渡，动作完整收势后回待机。
-- 保留连续小盹与自然苏醒；用户交互可取消，任务忙碌时减少新增自主入睡。
-- Retina画布及1×/2×图集；标准Codex v2皮肤兼容保留，内置皮肤ID为`AllBuy`。
-- 外观、动作、窗口与行为集中在状态栏/托盘；右键只保留任务通知和隐藏。支持位置记忆、默认关闭的可选开机启动。
-- 任务完成、待处理和中断使用漫画气泡：显示4秒，再以0.3秒渐隐。自动消失不清除未读；同一提醒不反复弹出，新提醒重新计时。
-- 默认关闭的 Codex 本地任务跟随；不显示额度，也不自动查询额度。
-- 默认使用本地规则；可在“动作 → Jev”粘贴并验证 API Key，启用 Jev 决策，测试连接或删除凭据。请求失败时回退本地规则。
-- 不含养成、联网对话、自动更新或全局键盘监听。
-
-Jev 只选择已有的 ambient 动作，不参与动画帧、拖动或用户点击。API Key 保存在 macOS Keychain 或 Windows Credential Manager；设置文件只记录是否启用，界面状态查询只返回是否配置和是否启用。只有用户主动粘贴密钥时才读取剪贴板。验证、测试连接或启用 Jev 时会向 `https://api.typesafe.ai/v1/systemone` 发送活动模式、小时、最多五条近期动作、两项相对时间和可用动作；不发送图片、文件内容或用户文本。开发测试仍可用临时 `TYPESAFE_API_KEY` 和 `AOBAI_BEHAVIOR_PROVIDER=jev` 环境变量；不要把密钥写入仓库或设置文件。
-
-## 构建和运行
-
-安装 Node.js 22 和 Rust stable，以及对应平台的 Tauri 构建依赖后：
+| 目标 | 说明 |
+| --- | --- |
+| 用户操作与启动 | [使用指南](docs/USAGE.md) |
+| Windows环境、打包与真机检查 | [Windows测试](docs/WINDOWS_TESTING.md) / [结果模板](docs/WINDOWS_TEST_RESULT_TEMPLATE.md) |
+| 源码开发与检查 | [构建指南](docs/BUILDING.md) |
+| 设置、凭据、任务通知与隐私 | [配置说明](docs/CONFIGURATION.md) / [安全说明](SECURITY.md) |
+| 输出目录、同步、Release与回退 | [交付说明](docs/RELEASE.md) |
+| 当前证据与平台限制 | [测试说明](docs/TESTING.md) |
+| 排错与全部文档 | [故障排查](docs/TROUBLESHOOTING.md) / [文档索引](docs/README.md) |
 
 ```sh
 git clone https://github.com/wilsoncc0514/aobai-desktop-public.git
@@ -34,53 +32,8 @@ npm run build
 npm run tauri dev
 ```
 
-macOS 生成带双击command的目录：
+开发需要Node.js 22、Rust stable与平台Tauri依赖；Windows用上方专用步骤，不将POSIX脚本当作通用命令。源码克隆不自带可执行程序，不能拿旧ZIP代替新提交构建。
 
-```sh
-npm run bundle:candidate
-```
+当前公开实现基线为 `87a99acf1d4e22762f365a813afcb20355e40d51`，文档提交在其后继续。Mac自动检查和局部原生结果不代表本轮Windows/Intel Mac/跨DPI或全部动画自然性通过；实时CI从对应提交的Checks查看。
 
-输出在 `aobai-desktop/release/鳌拜·桌面宠物-本地候选/`。完整保留启动器、隐藏的`.runtime`与`skin`目录；不要单独搬走command。退出和重新显示使用顶部菜单栏猫头图标。
-
-Windows构建入口（PowerShell 5.1 打包已实机验收，GUI 仍需复验）：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1
-```
-
-Rust检查：
-
-```sh
-cargo test --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-```
-
-## 外部皮肤
-
-在启动器同级的`skin/<目录>/`放置`pet.json`及图集，使用状态栏/托盘菜单“外观 → 重新扫描 skin”。
-
-```json
-{
-  "id": "my-pet",
-  "displayName": "我的桌宠",
-  "spriteVersionNumber": 2,
-  "spritesheetPath": "spritesheet.webp"
-}
-```
-
-标准图集为1536×2288、8列×11行，单帧192×208。可选`spritesheet2xPath`指向3072×4576副本。无效高清图回退标准图；无效外部皮肤不能取代内置回退。可变帧motion格式目前仅用于内置鳌拜，不是外部皮肤公开契约。
-
-## 测试范围与限制
-
-- 当前Mac测试包为Apple Silicon arm64，最低目标macOS 12，不适用Intel Mac。
-- 用户已在主要Mac上确认按住拖动、动作衔接及最新尾巴方向；其他Mac、混合DPI和Windows桌面GUI仍需测试。
-- 并非所有保留旧动作都有新过渡帧；2×图集不代表每帧均具有原生416像素毛发细节。
-- 程序未做Apple Developer ID签名或公证，可能被系统安全检查阻止。请勿关闭系统安全功能。
-
-当前通知读取有界的本机 Codex rollout 日志，最多32个近期会话；首次回看每文件最多4 MiB，增量每轮128 KiB。不能覆盖全部审批、归档或跨设备任务，信息不足时显示未知，绝不自动批准或回复。仅保留项目末级目录名、任务/轮次标识和提醒状态，不保存提问/回复正文；未读最长保留24小时。打开会话使用 Codex 桌面深链，目标页面显示仍取决于本机 Codex 版本。
-
-见[测试说明](docs/TESTING.md)、[安全说明](SECURITY.md)和[权利状态](RIGHTS.md)。
-
-## 公开范围
-
-本仓库从经过筛选的快照独立建立，只包含应用源码、锁定依赖、测试、构建脚本和成品皮肤。无原始参考照片、长期记忆、制作过程文件或旧开发历史。公开可见不代表已选择开源许可证。
+本仓没有选定开源许可证。公开可查看不等于授予原始代码或美术宽泛再使用许可，见[权利状态](RIGHTS.md)。第三方组件仍受各自许可证约束。

@@ -1,30 +1,30 @@
-# tested-tail-20260920
+# 测试方法与已验证范围
 
-用户已在主要Apple Silicon Mac实测确认“按住拖动、动作衔接和最新尾巴方向”可用。Windows PowerShell 5.1 打包已在中文且含空格的路径中实测通过，并验证 npm 失败时脚本会立即终止；当前公开提交的 Windows 桌面 GUI 仍需重新验收。
+更新日期：2026-10-28。测试结果必须绑定仓库、完整提交SHA、平台和执行日期；本文件提供入口，不替代新机器实测。
 
-源实现检查：67项前端测试、30项Python测试、12项Rust测试、生产构建、Rust格式检查和Clippy通过。Python测试包含私有制作流程检查；公开仓保留运行时与Windows打包回归测试，但不包含原始参考、制作过程素材或私有交接记录。
+## 既有证据
 
-主要验证点：
+| 范围 | 最近记录 | 不能据此声明 |
+| --- | --- | --- |
+| 本地Apple Silicon自动检查 | 177项前端、38项Rust；TypeScript/Vite、fmt/clippy通过 | Windows、Intel Mac或全动作原生通过 |
+| 独立公开导出检查 | 同样177/38，另19项图片/打包Python检查通过 | 全套私有制作过程检查已公开或所有图片均自然 |
+| macOS原生 | 任务元数据、真实气泡、精简右键、一次完整伸展回idle | 每一帧爪支撑/尾巴相位、混合DPI及所有动作均通过 |
+| 四秒渐隐 | 生产组件假时钟覆盖4秒停留、300ms渐隐、新提醒重置、去重及卸载清理 | 已原生录到渐隐全过程 |
+| 公开基线CI | [87a99ac 的 macos-14 / windows-latest 检查已成功](https://github.com/wilsoncc0514/aobai-desktop-public/actions/runs/40647666599)，2026-10-28核对 | Windows11真实桌面、其他提交或未来运行均已通过 |
+| Windows | 旧PowerShell 5.1打包与历史GUI结果存在 | 本轮Windows桌面验收完成 |
 
-1. 正面蹲坐；尾巴左侧根部基本固定，越靠右摆幅越大，右侧整片尾段沿弧线抬落；头、身体和前爪保持稳定。
-2. 悬停不触发；按下翻肚皮、按住拖动、松手收势，无左右跑动替换。
-3. 舔爪、踩奶、伸展完整播放并自然回坐。
-4. 退出重启、位置记忆、托盘/菜单、换肤失败回退。
-5. 外接屏和缩放变化；反馈应包含Mac芯片、系统版本、缩放和最小复现步骤。
+远端CI状态以对应提交的Checks/Actions为准，不能把运行中或旧提交的绿灯写为当前通过。Unix专用测试在Windows会跳过，测试数不要求跨平台相同。
 
-Mac测试ZIP标识：`鳌拜·桌面宠物-macOS-arm64-test-20260917.zip`。
+## 自动检查入口
 
-- 仅Apple Silicon arm64，macOS12+，不适用Intel Mac。
-- ZIP SHA-256：`7a4d66fea90f6fc4abb47435b90f67e464d80c22ba43137d14e092100a349ea2`。
-- 已在新的本机临时目录解压、校验7个文件，并确认command与二进制执行位及arm64架构；因本机已有候选进程，未强制关闭现有实例启动解压副本。
-- 未模拟另一台Mac、全新系统账号或聊天下载后的隔离属性。
-- 版本元数据保留0.4.1，以快照编号区分旧版；本仓库不会自动下载或运行测试ZIP。
+从应用目录执行 `npm ci`、`npm test`、`npm run build`，再执行 `cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo test --manifest-path src-tauri/Cargo.toml`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`。命令失败即停止依赖步骤。
 
-回滚：退出当前实例，运行自行保留的上一版本。不要为回滚删除用户配置。
+macOS可用 `npm run check:rust`；Windows用Windows指南中的直接Cargo命令，不依赖POSIX sh。`publicAssets.test.mjs` 属于Vitest套件，用 `npm test` 或Vitest执行，不用 `node --test`。Python检查是可选补充，需要与脚本匹配的Pillow/NumPy等既有环境，不在本轮自动安装新依赖。
 
+## 原生与报告
 
-## 2026-10-28 快照
+Windows必须使用[当前交接](WINDOWS_TESTING.md)和[结果模板](WINDOWS_TEST_RESULT_TEMPLATE.md)。macOS同样分别记录状态栏、隐藏后显示、拖动、皮肤、任务深链、Jev凭据授权与退出重开；浏览器、Vue host renderer和CI都不能替代这些检查。
 
-本地 Apple Silicon macOS：177 项前端测试、38 项 Rust 测试通过，TypeScript/Vite、rustfmt、clippy 检查通过。生产组件假时钟验证4秒停留、300ms渐隐、新提醒重置、重复快照不重播、不清除未读及关闭清理。原生验证任务读取、真实通知气泡、精简右键菜单与动作回坐；未目视捕获当前渐隐全过程。状态栏分组通过真实API调用路径回归，未将 SystemUIServer 自动化失败记为原生通过。
+动画检查同时观察起势、保持、收势、动作间休息、猫的重心、爪部支撑、尾部延迟、毛缘与尺度；自动像素指标不是自然动作的最终证明。录屏/截图只留必要裁剪，公开前去除个人信息，不提交原始桌面、日志或认证文件。
 
-本轮 Windows、Intel Mac、其他机器、混合DPI和全部审批路径尚未原生复验。CI不替代原生GUI验收；Codex目标会话页面内容未由自动化工具目视核对。
+本轮说明规范化只验证文档链接、工作目录、命令/输出与源码的一致性，不修改运行代码、不重新宣称上述软件或原生检查已执行。当前Mac无Windows/PowerShell环境，Windows命令仍需按交接在目标机器执行。
