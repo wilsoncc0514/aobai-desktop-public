@@ -10,6 +10,7 @@
 | [Windows测试](WINDOWS_TESTING.md) / [结果模板](WINDOWS_TEST_RESULT_TEMPLATE.md) | 失败即停构建与W01–W16真机清单 |
 | [测试范围](TESTING.md) | 已验证、未验证与CI边界 |
 | [配置与隐私](CONFIGURATION.md) | 设置、系统凭据、Codex元数据 |
+| [自定义皮肤 v2](SKIN_V2_GUIDE.md) | 图集、清单和制作检查 |
 | [故障排查](TROUBLESHOOTING.md) | 失败复现、路径、深链与恢复 |
 | [交付与回退](RELEASE.md) / [变更记录](../CHANGELOG.md) | 输出、同步、版本与历史 |
 | [安全](../SECURITY.md) / [权利](../RIGHTS.md) | 安全反馈、公开范围和许可 |

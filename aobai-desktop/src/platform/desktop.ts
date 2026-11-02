@@ -1,9 +1,10 @@
-import { EMPTY_CODEX, PHASE_LABEL, noticeText, taskSummary, type CodexSnapshot } from "../codex/model";
+import { EMPTY_CODEX, PHASE_LABEL, noticeText, taskSummary, isConfirmedWaiting, isConfirmedNotice, type CodexSnapshot } from "../codex/model";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu";
 import { TrayIcon } from "@tauri-apps/api/tray";
 import {
+  LogicalSize,
   PhysicalPosition,
   availableMonitors,
   currentMonitor,
@@ -13,12 +14,31 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { DEFAULT_SETTINGS, normalizeSettings, type DesktopSettings } from "../settings/schema";
 import { contextMenuXOffset } from "./menuPlacement";
 import { hasReachableArea } from "./windowPosition";
+import { PetWindowLayout, PET_HEIGHT } from "./petWindowLayout";
 
 const WEB_STORAGE_KEY = "aobai-desktop-settings";
+let petWindowLayout: PetWindowLayout | undefined;
+export function getPetWindowLayout(): PetWindowLayout | undefined {
+  if (!runningInTauri()) return undefined;
+  if (!petWindowLayout) {
+    const window = getCurrentWindow();
+    petWindowLayout = new PetWindowLayout({
+      position: () => window.outerPosition(),
+      height: async () => (await window.outerSize()).height,
+      scale: () => window.scaleFactor(),
+      resize: height => window.setSize(new LogicalSize(PET_HEIGHT, height)),
+      move: p => window.setPosition(new PhysicalPosition(p.x, p.y)),
+    });
+  }
+  return petWindowLayout;
+}
+
 let previousContextMenu: Menu | undefined;
 let previousTrayMenu: Menu | undefined;
 let trayMenuChain: Promise<void> = Promise.resolve();
 let pendingTrayUpdate: (() => Promise<void>) | undefined;
+let installedTrayKey: string | undefined;
+let trayAction: (action: ContextMenuAction) => void = () => undefined;
 
 export interface JevStatus {
   readonly loading?: boolean;
@@ -129,24 +149,51 @@ export async function applyWindowLayer(layer: DesktopSettings["windowLayer"]): P
 }
 
 function buildTaskMenu(codex: CodexSnapshot, action: (id: ContextMenuAction) => () => void) {
+  const confirmed = codex.notices.filter(n => isConfirmedWaiting(codex, n));
+  const uncertain = codex.notices.filter(n => n.kind === "waiting" && !isConfirmedWaiting(codex, n));
+  const notices = [...confirmed, ...uncertain, ...codex.notices.filter(n => n.kind !== "waiting")];
+  const waitingCount = confirmed.length;
+  const selected = codex.tasks.slice(0, 16);
+  type TaskMenuItem = { text: string; id?: string; action?: () => void; items?: TaskMenuItem[] };
+  const visited = new Set<string>();
+  const taskItem = (t: typeof selected[number], prefix = ""): TaskMenuItem => ({
+    text: `${prefix}${t.project} · ${PHASE_LABEL[t.phase]} · ${t.id.slice(-6)}`,
+    id: `pet:codex:task:${t.id}`, action: action(`codex:open:${t.id}`),
+  });
+  function branch(task: typeof selected[number]): TaskMenuItem {
+    visited.add(task.id);
+    const descendants = selected.filter(t => t.parentId === task.id && !visited.has(t.id));
+    if (!descendants.length) return taskItem(task, task.parentId ? "子任务 · " : "");
+    const label = taskItem(task, task.parentId ? "子任务 · " : "").text;
+    const items: TaskMenuItem[] = [taskItem(task, task.parentId ? "打开子任务 · " : "打开主任务 · ")];
+    for (const child of descendants) if (!visited.has(child.id)) items.push(branch(child));
+    return { text: label, items };
+  }
+  const tasks: TaskMenuItem[] = [];
+  for (const task of selected) if (!task.parentId && !visited.has(task.id)) tasks.push(branch(task));
+  // Start missing-parent branches at their oldest visible ancestor; then break malformed cycles.
+  const orphans: TaskMenuItem[] = [];
+  const ids = new Set(selected.map(t => t.id));
+  for (const task of selected) {
+    if (task.parentId && !ids.has(task.parentId) && !visited.has(task.id)) orphans.push(branch(task));
+  }
+  for (const task of selected) if (!visited.has(task.id)) orphans.push(branch(task));
+  if (orphans.length) tasks.push({ text: "其他子任务（层级不完整）", items: orphans });
   return {
-      text: "Codex",
-      items: [
-        { text: "任务通知", checked: codex.enabled, id: "pet:codex:toggle", action: action("codex:toggle") },
-        { text: codex.message, enabled: false },
-        ...(codex.enabled ? [
-          { text: taskSummary(codex), enabled: false },
-          { text: `未读提醒 ${codex.notices.length}`, items: codex.notices.length ? codex.notices.slice(0, 12).map(n => ({ text: noticeText(n), items: [
-            { text: "打开会话", id: `pet:codex:notice:${n.key}`, action: action(`codex:open:${n.taskId}`) },
-            { text: "标为已读", id: `pet:codex:ack:${n.key}`, action: action(`codex:ack:${n.key}`) },
-          ] })) : [{ text: "暂无未读提醒", enabled: false }] },
-          { text: "最近任务", items: codex.tasks.length ? codex.tasks.slice(0, 16).map(t => ({
-            text: `${t.parentId ? "↳ " : ""}${t.project} · ${PHASE_LABEL[t.phase]} · ${t.id.slice(-6)}`,
-            id: `pet:codex:task:${t.id}`, action: action(`codex:open:${t.id}`),
-          })) : [{ text: "最近没有可读取的任务", enabled: false }] },
-        ] : []),
-      ],
-    };
+    text: "Codex",
+    items: [
+      { text: "任务通知", checked: codex.enabled, id: "pet:codex:toggle", action: action("codex:toggle") },
+      { text: codex.message, enabled: false },
+      ...(codex.enabled ? [
+        { text: taskSummary(codex), enabled: false },
+        { text: `未读提醒 ${codex.notices.length}${waitingCount ? ` · 待处理 ${waitingCount}` : ""}${uncertain.length ? ` · 待确认 ${uncertain.length}` : ""}`, items: notices.length ? notices.slice(0, 12).map(n => ({ text: n.kind === "waiting" && !isConfirmedWaiting(codex, n) ? `${n.project} · 状态待确认` : n.kind !== "waiting" && !isConfirmedNotice(codex, n) ? `历史记录 · ${noticeText(n)}` : noticeText(n), items: [
+          { text: "打开会话", id: `pet:codex:notice:${n.key}`, action: action(`codex:open:${n.taskId}`) },
+          { text: "标为已读", id: `pet:codex:ack:${n.key}`, action: action(`codex:ack:${n.key}`) },
+        ] })) : [{ text: "暂无未读提醒", enabled: false }] },
+        { text: "最近任务", items: tasks.length ? tasks : [{ text: "最近没有可读取的任务", enabled: false }] },
+      ] : []),
+    ],
+  };
 }
 
 export function buildPetContextMenuTree(codex: CodexSnapshot, action: (id: ContextMenuAction) => () => void) {
@@ -263,15 +310,20 @@ export function syncTrayContextMenu(
   codex: CodexSnapshot = EMPTY_CODEX,
 ): Promise<void> {
   if (!runningInTauri()) return Promise.resolve();
+  trayAction = onAction;
+  const items = [
+    { id: "show", text: "显示鳌拜" },
+    ...buildContextMenuTree(settings, skins, jevStatus, (id) => () => trayAction(id), codex),
+    { item: "Separator" as const },
+    { id: "quit", text: "退出" },
+  ];
+  // Functions are omitted by JSON.stringify; all rendered labels, IDs and flags remain.
+  const key = JSON.stringify(items);
   pendingTrayUpdate = async () => {
+    if (key === installedTrayKey) return;
     const tray = await TrayIcon.getById("main");
     if (!tray) throw new Error("状态栏图标未就绪");
-    const menu = await Menu.new({ id: "pet-tray-menu", items: [
-      { id: "show", text: "显示鳌拜" },
-      ...buildContextMenuTree(settings, skins, jevStatus, (id) => () => onAction(id), codex),
-      { item: "Separator" },
-      { id: "quit", text: "退出" },
-    ] });
+    const menu = await Menu.new({ id: "pet-tray-menu", items });
     try {
       await tray.setMenu(menu);
     } catch (error) {
@@ -280,6 +332,7 @@ export function syncTrayContextMenu(
     }
     const old = previousTrayMenu;
     previousTrayMenu = menu;
+    installedTrayKey = key;
     await old?.close();
     // getById returns the registered resource itself; closing it removes the icon.
   };

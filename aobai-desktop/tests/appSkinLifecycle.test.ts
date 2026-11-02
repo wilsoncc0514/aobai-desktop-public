@@ -36,6 +36,7 @@ vi.mock("../src/platform/desktop", () => {
     listenForTrayLayer: listen, listenForTrayMode: listen, listenForTraySkinReload: listen, onWindowMoved: listen,
     applyWindowLayer: noop, restoreWindowPosition: noop, syncTrayContextMenu: noop,
     saveSettings: noop, centerWindow: noop, deleteJevKey: noop, focusPetWindow: noop,
+    getPetWindowLayout: () => undefined,
     getWindowPosition: async () => ({ x: 0, y: 0 }), moveWindowTo: noop, hideWindow: noop,
     setAutostartEnabled: noop, setJevEnabled: noop, showPetContextMenu: noop,
     startWindowDrag: noop, testJevConnection: noop, verifyAndSaveJevKey: noop,
@@ -175,10 +176,37 @@ describe("Codex reminder lifecycle in the mounted pet", () => {
   });
   const notice={key:"task:turn:waiting",taskId:"11111111-1111-4111-8111-111111111111",project:"测试项目",kind:"waiting",at:1};
   function find(n:Node,cls:string):Node|undefined {return n.props.class===cls?n:n.children.map(c=>find(c,cls)).find(Boolean);}
+  const waitingTask = { id: notice.taskId, turnId: "turn", project: notice.project, parentId: null, phase: "waiting" as const, lastSeen: 1 };
+  it("does not replay an old completion while a later turn is running", async () => {
+    mount(); await flush();
+    const completed = { ...notice, key: `${notice.taskId}:old:completed`, kind: "completed" };
+    const running = { ...waitingTask, turnId: "new", phase: "running" as const };
+    host.codexListener?.({...EMPTY_CODEX, revision:2, enabled:true, notices:[completed], tasks:[running]}); await nextTick();
+    expect(find(root,"codex-reminder")).toBeUndefined();
+    expect(host.codexAck).not.toHaveBeenCalled();
+  });
+  it("dismisses a completion bubble when a later turn begins", async () => {
+    mount(); await flush();
+    const completed = { ...notice, key: `${notice.taskId}:old:completed`, kind: "completed" };
+    const done = { ...waitingTask, turnId: "old", phase: "completed" as const };
+    host.codexListener?.({...EMPTY_CODEX, revision:2, enabled:true, notices:[completed], tasks:[done]}); await nextTick();
+    expect(find(root,"codex-reminder")).toBeDefined();
+    host.codexListener?.({...EMPTY_CODEX, revision:3, enabled:true, notices:[completed], tasks:[{...done,turnId:"new",phase:"running"}]}); await nextTick();
+    expect(find(root,"codex-reminder")).toBeUndefined();
+    expect(host.codexAck).not.toHaveBeenCalled();
+  });
+  it("retains an unconfirmed waiting notice without showing it until its task is confirmed", async () => {
+    mount(); await flush();
+    host.codexListener?.({...EMPTY_CODEX, revision:2, enabled:true, notices:[notice]}); await nextTick();
+    expect(find(root,"codex-reminder")).toBeUndefined();
+    host.codexListener?.({...EMPTY_CODEX, revision:3, enabled:true, notices:[notice], tasks:[waitingTask]}); await nextTick();
+    expect(find(root,"codex-reminder")).toBeDefined();
+    expect(host.codexAck).not.toHaveBeenCalled();
+  });
   it("shows unread text and opens the intended conversation without requesting a cat action",async()=>{
     mount();await flush();await vi.advanceTimersByTimeAsync(2500);await nextTick();const before=host.rows[host.rows.length - 1];
-    host.codexListener?.({...EMPTY_CODEX,revision:2,enabled:true,notices:[notice]});await nextTick();
-    expect(text(root)).toContain("测试项目");expect(text(root)).toContain("喵，需要你看一下。");
+    host.codexListener?.({...EMPTY_CODEX,revision:2,enabled:true,notices:[notice],tasks:[waitingTask]});await nextTick();
+    expect(text(root)).toContain("测试项目");expect(text(root)).toMatch(/喵，需要你看一下。|喵，这里要你来决定。|喵，有件事等你看看。/);
     const button=find(root,"codex-open");expect(button).toBeDefined();
     (button!.props.onClick as (e:unknown)=>void)({stopPropagation:()=>undefined});await flush();
     expect(host.codexOpen).toHaveBeenCalledWith(notice.taskId);expect(host.rows[host.rows.length - 1]).toBe(before);
@@ -188,23 +216,27 @@ describe("Codex reminder lifecycle in the mounted pet", () => {
   });
   it("holds for four seconds, fades without acknowledging, and does not replay the same unread",async()=>{
     mount();await flush();
-    host.codexListener?.({...EMPTY_CODEX,revision:2,enabled:true,notices:[notice]});await nextTick();
+    host.codexListener?.({...EMPTY_CODEX,revision:2,enabled:true,notices:[notice],tasks:[waitingTask]});await nextTick();
     await vi.advanceTimersByTimeAsync(3999);await nextTick();
-    expect(text(root)).toContain("喵，需要你看一下。");
+    expect(text(root)).toMatch(/喵，需要你看一下。|喵，这里要你来决定。|喵，有件事等你看看。/);
+    const displayed = text(root);
+    host.codexListener?.({...EMPTY_CODEX,revision:3,enabled:true,notices:[notice],tasks:[waitingTask]});await nextTick();
+    expect(text(root)).toBe(displayed);
     await vi.advanceTimersByTimeAsync(1);await nextTick();
     expect(find(root,"codex-reminder is-fading")).toBeDefined();
-    expect(text(root)).toContain("喵，需要你看一下。");
+    expect(text(root)).toMatch(/喵，需要你看一下。|喵，这里要你来决定。|喵，有件事等你看看。/);
     await vi.advanceTimersByTimeAsync(300);await nextTick();
-    expect(text(root)).not.toContain("喵，需要你看一下。");expect(host.codexAck).not.toHaveBeenCalled();
-    host.codexListener?.({...EMPTY_CODEX,revision:3,enabled:true,notices:[notice]});await nextTick();
-    expect(text(root)).not.toContain("喵，需要你看一下。");
+    expect(find(root,"codex-reminder")).toBeUndefined();expect(host.codexAck).not.toHaveBeenCalled();
+    host.codexListener?.({...EMPTY_CODEX,revision:4,enabled:true,notices:[notice],tasks:[waitingTask]});await nextTick();
+    expect(find(root,"codex-reminder")).toBeUndefined();
   });
   it("resets the full display time for a new notice and cancels timers on close",async()=>{
-    mount();await flush();host.codexListener?.({...EMPTY_CODEX,revision:2,enabled:true,notices:[notice]});
+    mount();await flush();host.codexListener?.({...EMPTY_CODEX,revision:2,enabled:true,notices:[notice],tasks:[waitingTask]});
     await vi.advanceTimersByTimeAsync(4100);await nextTick();
-    const next={...notice,key:"new",kind:"completed"};
-    host.codexListener?.({...EMPTY_CODEX,revision:3,enabled:true,notices:[next,notice]});await nextTick();
-    await vi.advanceTimersByTimeAsync(3900);await nextTick();expect(text(root)).toContain("喵，这一轮完成啦！");
+    const next={...notice,key:`${notice.taskId}:turn:completed`,kind:"completed"};
+    const completedTask={...waitingTask,phase:"completed" as const};
+    host.codexListener?.({...EMPTY_CODEX,revision:3,enabled:true,notices:[next,notice],tasks:[completedTask]});await nextTick();
+    await vi.advanceTimersByTimeAsync(3900);await nextTick();expect(text(root)).toMatch(/喵，这一轮完成啦！|呼噜呼噜，任务完成啦。|喵呜，快来看看成果。/);
     app!.unmount();app=undefined;expect(vi.getTimerCount()).toBe(0);
   });
   it("ignores an old startup reply after a newer disabled event",async()=>{

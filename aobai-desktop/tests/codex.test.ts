@@ -36,7 +36,16 @@ describe("Codex follow", () => {
 it("speaks naturally without confusing child completion with the parent",async()=>{
   const {noticeSpeech}=await import("../src/codex/model");
   const n={key:"k",taskId:"id",project:"项目",kind:"completed",at:1};
-  expect(noticeSpeech(n)).toBe("喵，这一轮完成啦！");
-  expect(noticeSpeech({...n,parentId:"parent"})).toContain("小帮手");
-  expect(noticeSpeech({...n,kind:"waiting"})).toBe("喵，需要你看一下。");
+  expect(noticeSpeech(n, () => 0)).toBe("喵，这一轮完成啦！");
+  expect(noticeSpeech({...n,parentId:"parent"}, () => 0)).toContain("小帮手");
+  expect(noticeSpeech({...n,kind:"waiting"}, () => 0)).toBe("喵，需要你看一下。");
+});
+
+it("does not replay old child completion as a bubble, while retaining parent completion and child requests", () => {
+  const child = { key: "child", taskId: "child", parentId: "parent", project: "p", kind: "completed", at: 1 };
+  const parent = { key: "parent", taskId: "parent", project: "p", kind: "completed", at: 2 };
+  const waiting = { ...child, key: "question", kind: "waiting" };
+  expect(primaryNotice({ ...snapshot, notices: [child] })).toBeUndefined();
+  expect(primaryNotice({ ...snapshot, notices: [child, parent] })).toEqual(parent);
+  expect(primaryNotice({ ...snapshot, notices: [child, waiting, parent] })).toEqual(waiting);
 });

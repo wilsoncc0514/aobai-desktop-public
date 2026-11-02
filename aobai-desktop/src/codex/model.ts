@@ -29,9 +29,21 @@ export function quotaText(window: QuotaWindow, snapshot: CodexSnapshot, now: num
   }
   return text;
 }
+export function isConfirmedWaiting(snapshot: CodexSnapshot, notice: CodexNotice): boolean {
+  return notice.kind === "waiting" && snapshot.tasks.some(t => t.id === notice.taskId && t.phase === "waiting");
+}
+export function isConfirmedNotice(snapshot: CodexSnapshot, notice: CodexNotice): boolean {
+  if (notice.kind === "waiting") return isConfirmedWaiting(snapshot, notice);
+  if (notice.kind !== "completed" && notice.kind !== "interrupted") return false;
+  return snapshot.tasks.some(t => t.id === notice.taskId && t.phase === notice.kind &&
+    notice.key === `${t.id}:${t.turnId}:${notice.kind}`);
+}
 export function primaryNotice(snapshot: CodexSnapshot): CodexNotice | undefined {
   if (!snapshot.enabled) return undefined;
-  return snapshot.notices.find(n => n.kind === "waiting") ?? snapshot.notices[0];
+  // Older inboxes may contain child-completion entries; keep them in the inbox
+  // but do not present them as the completion of the conversation.
+  const visible = snapshot.notices.filter(n => !(n.kind === "completed" && n.parentId));
+  return visible.find(n => n.kind === "waiting") ?? visible[0];
 }
 export function noticeText(n: CodexNotice): string {
   const subject = n.parentId ? "子任务" : "任务";
@@ -42,8 +54,14 @@ export function newerSnapshot(current: CodexSnapshot, incoming: CodexSnapshot): 
   return incoming.revision >= current.revision ? incoming : current;
 }
 
-export function noticeSpeech(n: CodexNotice): string {
-  if (n.kind === "waiting") return "喵，需要你看一下。";
-  if (n.kind === "completed") return n.parentId ? "喵，小帮手完成这一轮啦！" : "喵，这一轮完成啦！";
-  return "喵，这一轮中断了。";
+export function noticeSpeech(n: CodexNotice, random = Math.random): string {
+  const options = n.kind === "waiting"
+    ? ["喵，需要你看一下。", "喵，这里要你来决定。", "喵，有件事等你看看。"]
+    : n.kind === "completed"
+      ? n.parentId
+        ? ["喵，小帮手完成这一轮啦！", "喵，小帮手忙完啦。", "呼噜，小帮手完成了。"]
+        : ["喵，这一轮完成啦！", "呼噜呼噜，任务完成啦。", "喵呜，快来看看成果。"]
+      : ["喵，这一轮中断了。", "喵，任务停下来啦。", "喵，这次没能继续。"];
+  const index = Math.min(options.length - 1, Math.max(0, Math.floor(random() * options.length)));
+  return options[index]!;
 }

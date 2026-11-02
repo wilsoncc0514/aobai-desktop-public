@@ -1,5 +1,5 @@
 //! Bounded, read-only rollout metadata. No prompt/reply text is retained or emitted.
-use super::model::{MAX_TASKS, Notice, Phase, Task, label, valid_id};
+use super::model::{MAX_NOTICES, MAX_TASKS, Notice, Phase, Task, label, valid_id};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -8,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
 };
 const READ_BYTES: usize = 128 * 1024;
+// Allow bounded catch-up after bursts, while retaining the per-record limit.
+const READ_CHUNK_BYTES: usize = 1024 * 1024;
 const SCAN_BUDGET: usize = 4096;
 
 fn stamp(v: &Value) -> Option<u64> {
@@ -93,12 +95,24 @@ pub fn consume(task: &mut Task, line: &str, live: bool, now: u64) -> Option<Noti
                     return None;
                 }
                 task.turn_id = turn.into();
-                task.waiting_call = None;
-                task.phase = if kind == "task_complete" {
-                    Phase::Completed
+                // The desktop can finish this turn after posting an async question.
+                // A successful accepted=true response is still awaiting the user.
+                if kind == "task_complete"
+                    && task.phase == Phase::Waiting
+                    && task
+                        .waiting_call
+                        .as_ref()
+                        .is_some_and(|(_, asynchronous)| *asynchronous)
+                {
+                    // Preserve the waiting key until a reply or a later turn.
                 } else {
-                    Phase::Interrupted
-                };
+                    task.waiting_call = None;
+                    task.phase = if kind == "task_complete" {
+                        Phase::Completed
+                    } else {
+                        Phase::Interrupted
+                    };
+                }
             }
             "exec_approval_request" | "apply_patch_approval_request" => {
                 if task.turn_id.is_empty()
@@ -173,7 +187,11 @@ pub fn consume(task: &mut Task, line: &str, live: bool, now: u64) -> Option<Noti
         return None;
     }
     task.last_seen = at;
-    if !live || old_phase == task.phase || now.saturating_sub(at) > 60 {
+    if !live || old_phase == task.phase {
+        return None;
+    }
+    // A child turn ending does not mean the enclosing conversation is done.
+    if task.parent_id.is_some() && task.phase == Phase::Completed {
         return None;
     }
     let kind = match task.phase {
@@ -182,6 +200,11 @@ pub fn consume(task: &mut Task, line: &str, live: bool, now: u64) -> Option<Noti
         Phase::Interrupted if matches!(old_phase, Phase::Running | Phase::Waiting) => "interrupted",
         _ => return None,
     };
+    // A verified unanswered question still needs attention after a slow catch-up;
+    // stale completed/interrupted events remain silent.
+    if kind != "waiting" && now.saturating_sub(at) > 60 {
+        return None;
+    }
     Some(Notice {
         parent_id: task.parent_id.clone(),
         key: if kind == "waiting" {
@@ -213,6 +236,8 @@ struct Cursor {
     modified: std::time::SystemTime,
     task: Task,
     discarding: bool,
+    behind: bool,
+    pending: Vec<Notice>,
 }
 #[derive(Default)]
 pub struct Reader {
@@ -321,6 +346,7 @@ impl Reader {
                     continue;
                 }
                 let mut task = task;
+                let mut pending = Vec::new();
                 let last = tail.iter().rposition(|b| *b == b'\n');
                 let skip = if offset > 0 {
                     tail.iter()
@@ -338,11 +364,18 @@ impl Reader {
                             && let Ok(line) = std::str::from_utf8(line)
                             && let Some(n) = consume(&mut task, line, self.primed, now)
                         {
-                            notices.push(n);
+                            pending.push(n);
+                            if pending.len() > MAX_NOTICES {
+                                pending.remove(0);
+                            }
                         }
                     }
                 }
                 let end = last.map(|i| offset + i as u64 + 1).unwrap_or(offset);
+                let behind = end < size;
+                if !behind {
+                    notices.append(&mut pending);
+                }
                 self.cursors.insert(
                     p.clone(),
                     Cursor {
@@ -350,22 +383,25 @@ impl Reader {
                         modified,
                         task,
                         discarding: last.is_none() && offset > 0,
+                        behind,
+                        pending,
                     },
                 );
                 continue;
             }
             let c = self.cursors.get_mut(&p).expect("cursor initialized");
+            c.behind = c.offset < size || c.discarding;
             let old = c.offset;
             if file.seek(SeekFrom::Start(old)).is_err() {
                 continue;
             }
-            let mut bytes = vec![0; size.saturating_sub(old).min(READ_BYTES as u64) as usize];
+            let mut bytes = vec![0; size.saturating_sub(old).min(READ_CHUNK_BYTES as u64) as usize];
             if file.read_exact(&mut bytes).is_err() {
                 continue;
             }
             // Retry partial records; discard oversized records without stalling the cursor.
             let Some(last) = bytes.iter().rposition(|b| *b == b'\n') else {
-                if bytes.len() == READ_BYTES {
+                if bytes.len() >= READ_BYTES {
                     c.offset = old + bytes.len() as u64;
                     c.discarding = true;
                 }
@@ -385,27 +421,69 @@ impl Reader {
                     if let Ok(line) = std::str::from_utf8(line)
                         && let Some(n) = consume(&mut c.task, line, self.primed, now)
                     {
-                        notices.push(n);
+                        c.pending.push(n);
+                        if c.pending.len() > MAX_NOTICES {
+                            c.pending.remove(0);
+                        }
                     }
                 }
             }
             c.discarding = false;
             c.offset = old + last as u64 + 1;
+            c.behind = c.offset < size;
+            if !c.behind {
+                notices.append(&mut c.pending);
+            }
             c.modified = modified;
         }
         let mut tasks = self
             .cursors
             .values()
-            .map(|c| c.task.clone())
+            .map(|c| {
+                let mut task = c.task.clone();
+                if c.behind {
+                    task.phase = Phase::Unknown;
+                }
+                task
+            })
             .filter(|t| now.saturating_sub(t.last_seen) < 86400)
             .collect::<Vec<_>>();
         for t in &mut tasks {
+            let awaiting_accepted_question = t.phase == Phase::Waiting
+                && t.waiting_call
+                    .as_ref()
+                    .is_some_and(|(_, asynchronous)| *asynchronous);
             if matches!(t.phase, Phase::Running | Phase::Waiting)
+                && !awaiting_accepted_question
                 && now.saturating_sub(t.last_seen) > 600
             {
                 t.phase = Phase::Unknown;
             }
         }
+        // Intermediate transitions in one scan may already be superseded by a
+        // later turn or reply. Only report the task's final observed state.
+        notices.retain(|notice| {
+            (notice.kind == "waiting" || now.saturating_sub(notice.at) <= 60)
+                && tasks.iter().any(|task| {
+                    if task.id != notice.task_id {
+                        return false;
+                    }
+                    match notice.kind.as_str() {
+                        "waiting" => {
+                            task.phase == Phase::Waiting && notice.key == waiting_key(task)
+                        }
+                        "completed" => {
+                            task.phase == Phase::Completed
+                                && notice.key == format!("{}:{}:completed", task.id, task.turn_id)
+                        }
+                        "interrupted" => {
+                            task.phase == Phase::Interrupted
+                                && notice.key == format!("{}:{}:interrupted", task.id, task.turn_id)
+                        }
+                        _ => false,
+                    }
+                })
+        });
         self.primed = true;
         tasks.sort_by_key(|v| std::cmp::Reverse(v.last_seen));
         Ok((tasks, notices))

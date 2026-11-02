@@ -107,6 +107,21 @@ fn home() -> Option<PathBuf> {
                 .map(|p| PathBuf::from(p).join(".codex"))
         })
 }
+fn keep_notice(n: &Notice, tasks: &[model::Task], current: u64) -> bool {
+    if current.saturating_sub(n.at) >= 86400 {
+        return false;
+    }
+    if n.kind != "waiting" {
+        return true;
+    }
+    match tasks.iter().find(|t| t.id == n.task_id) {
+        // Absence or unknown state is not proof the user answered.
+        None => true,
+        Some(t) if t.phase == Phase::Unknown => true,
+        Some(t) if t.phase == Phase::Waiting => n.key == logs::waiting_key(t),
+        Some(_) => false,
+    }
+}
 impl Service {
     pub fn configure(&self, app: &AppHandle) -> Result<(), String> {
         let dir = app
@@ -254,15 +269,9 @@ impl Service {
                                 s.view.notices.insert(0, n);
                             }
                         }
-                        s.view.notices.retain(|n| {
-                            now().saturating_sub(n.at) < 86400
-                                && (n.kind != "waiting"
-                                    || s.view.tasks.iter().any(|t| {
-                                        t.id == n.task_id
-                                            && t.phase == Phase::Waiting
-                                            && n.key == logs::waiting_key(t)
-                                    }))
-                        });
+                        s.view
+                            .notices
+                            .retain(|n| keep_notice(n, &s.view.tasks, now()));
                         s.view.notices.truncate(MAX_NOTICES);
                         if s.preferences.inbox != s.view.notices {
                             let mut prefs = s.preferences.clone();

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { getCodexStatus, setCodexEnabled, openCodexTask, acknowledgeCodex, listenCodex } from "./codex/desktop";
-import { EMPTY_CODEX, isBusy, newerSnapshot, primaryNotice, noticeText, noticeSpeech, type CodexNotice, type CodexSnapshot } from "./codex/model";
+import { setCodexEnabled, openCodexTask, acknowledgeCodex } from "./codex/desktop";
+import { useCodexFollow } from "./codex/useCodexFollow";
+import { isBusy, noticeText } from "./codex/model";
 import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watchEffect } from "vue";
 import { ANIMATIONS, isPetState, type PetState } from "./animation/catalog";
 import {
@@ -41,6 +42,7 @@ import {
   listenForTraySkin,
   loadSettings,
   getWindowPosition,
+  getPetWindowLayout,
   moveWindowTo,
   onWindowMoved,
   restoreWindowPosition,
@@ -69,6 +71,11 @@ import {
 import { BUILTIN_SKIN, preloadSkin, scanSkins, type SkinInfo } from "./skins/catalog";
 
 const settings = ref<DesktopSettings>(DEFAULT_SETTINGS);
+const layoutReady = ref(false);
+const petLayout = getPetWindowLayout();
+function setLayoutSuspended(suspended: boolean): void {
+  if (!disposed) void petLayout?.suspend(suspended).catch(error => console.error("调整窗口失败", error));
+}
 const currentState = ref<MotionAction>("idle");
 const frameIndex = ref(0);
 const statusText = ref("");
@@ -97,6 +104,7 @@ let pointerStart: {
 } | null = null;
 let pendingDragPosition: Point | null = null;
 let dragMoveInFlight = false;
+let positionReadEpoch = 0;
 let lastFrameAt = 0;
 let previousAmbientState: PetState | null = null;
 let previousBehaviorAction: BehaviorAction | null = null;
@@ -114,48 +122,10 @@ const decisionTrace = import.meta.env.DEV ? new DecisionTrace() : null;
 let decisionProvider = createBehaviorDecisionProvider();
 const sleepSession = new SleepSession();
 const cleanups: Array<() => void> = [];
-const codex = shallowRef<CodexSnapshot>(EMPTY_CODEX);
-const codexReminder = shallowRef<CodexNotice>();
-const reminderFading = ref(false);
-const seenReminderKeys = new Set<string>();
-let reminderTimer: number | undefined;
-let reminderRemovalTimer: number | undefined;
-function clearReminder(): void {
-  window.clearTimeout(reminderTimer);
-  window.clearTimeout(reminderRemovalTimer);
-  codexReminder.value = undefined;
-  reminderFading.value = false;
-}
-function showReminder(notice: CodexNotice): void {
-  clearReminder();
-  codexReminder.value = notice;
-  reminderTimer = window.setTimeout(() => {
-    reminderFading.value = true;
-    reminderRemovalTimer = window.setTimeout(clearReminder, 300);
-  }, 4_000);
-}
+const { codex, reminder: codexReminder, fading: reminderFading, speech: reminderSpeech,
+  accept: acceptCodex, start: startCodexView, dispose: disposeCodexView } =
+  useCodexFollow(() => showStatus("Codex 状态暂不可用"));
 let codexOperationPending = false;
-function acceptCodex(snapshot: CodexSnapshot): void {
-  if (disposed || newerSnapshot(codex.value, snapshot) !== snapshot) return;
-  codex.value = snapshot;
-  if (!snapshot.enabled) { clearReminder(); return; }
-  if (codexReminder.value && !snapshot.notices.some(n => n.key === codexReminder.value?.key)) clearReminder();
-  const fresh = snapshot.notices.filter(n => !seenReminderKeys.has(n.key));
-  for (const n of fresh) seenReminderKeys.add(n.key);
-  while (seenReminderKeys.size > 256) seenReminderKeys.delete(seenReminderKeys.values().next().value!);
-  const next = primaryNotice({ ...snapshot, notices: fresh });
-  if (next) showReminder(next);
-}
-async function startCodexView(): Promise<void> {
-  try {
-    const unlisten = await listenCodex(acceptCodex);
-    if (disposed) { unlisten(); return; }
-    cleanups.push(unlisten);
-    acceptCodex(await getCodexStatus());
-    if (disposed) return;
-  } catch { if (!disposed) showStatus("Codex 状态暂不可用"); }
-}
-
 
 async function refreshJevStatus(expectedEpoch?: number, retryUnavailable = false): Promise<JevStatus | null> {
   try {
@@ -445,6 +415,7 @@ function onPointerDown(event: PointerEvent): void {
   if (event.button !== 0 || pointerStart !== null) return;
   lastUserInteractionAt = Date.now();
   cancelSleepSession();
+  setLayoutSuspended(true);
   const manual = shouldUseManualWindowDrag(navigator.userAgent);
   if (manual && event.currentTarget instanceof Element) {
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -495,6 +466,7 @@ async function onPointerMove(event: PointerEvent): Promise<void> {
       await startWindowDrag();
       player.release();
       isDragging.value = false;
+      setLayoutSuspended(false);
       return;
     }
     const origin = await start.origin;
@@ -507,6 +479,10 @@ async function onPointerMove(event: PointerEvent): Promise<void> {
     );
     void flushPendingDragMove();
   } catch (error) {
+    if (pointerStart === null) {
+      isDragging.value = false;
+      setLayoutSuspended(false);
+    }
     console.error("拖动窗口失败", error);
     showStatus("拖动失败");
   }
@@ -515,6 +491,7 @@ async function onPointerMove(event: PointerEvent): Promise<void> {
 function onPointerEnd(event: PointerEvent): void {
   if (pointerStart === null || event.pointerId !== pointerStart.pointerId) return;
   pointerStart = null;
+  setLayoutSuspended(false);
   if (
     event.currentTarget instanceof Element &&
     event.currentTarget.hasPointerCapture(event.pointerId)
@@ -532,6 +509,7 @@ function cancelInteraction(): void {
   const pointerId = pointerStart?.pointerId;
   pointerStart = null;
   pendingDragPosition = null;
+  setLayoutSuspended(false);
   const target = canvas.value?.parentElement;
   if (pointerId !== undefined && target?.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
   player.release();
@@ -767,8 +745,12 @@ onMounted(async () => {
 
   cleanups.push(
     await onWindowMoved((position) => {
-      settings.value = { ...settings.value, position };
-      persistSoon();
+      const epoch = ++positionReadEpoch;
+      void (petLayout ? petLayout.storedPosition() : Promise.resolve(position)).then(stored => {
+        if (disposed || epoch !== positionReadEpoch) return;
+        settings.value = { ...settings.value, position: stored };
+        persistSoon();
+      }).catch(error => console.error("保存窗口位置失败", error));
     }),
   );
   cleanups.push(await listenForTrayMode(setMode));
@@ -776,6 +758,13 @@ onMounted(async () => {
   cleanups.push(await listenForTraySkinReload(() => void reloadSkins()));
   cleanups.push(await listenForTraySkin((id) => void activateSkin(id)));
   scheduleAmbientAction();
+  layoutReady.value = true;
+});
+
+watchEffect(() => {
+  if (!layoutReady.value) return;
+  const expanded = Boolean(codexReminder.value || statusText.value);
+  void petLayout?.request(expanded).catch(error => console.error("调整窗口失败", error));
 });
 
 watchEffect(() => {
@@ -808,7 +797,7 @@ watchEffect((onCleanup) => {
 
 onBeforeUnmount(() => {
   disposed = true;
-  clearReminder();
+  disposeCodexView();
   ambientGate.invalidate();
   if (decisionTrace) Reflect.deleteProperty(window, "__AOBAI_DECISION_TRACE__");
   if (decisionTrace) Reflect.deleteProperty(window, "__AOBAI_COMPARE_JEV__");
@@ -832,7 +821,7 @@ onBeforeUnmount(() => {
     @lostpointercapture="onPointerEnd"
   >
     <div v-if="codexReminder" class="codex-reminder" :class="{ 'is-fading': reminderFading }" role="status" @pointerdown.stop @pointerup.stop @contextmenu.stop>
-      <button class="codex-open" @click.stop="handleMenuAction(`codex:open:${codexReminder.taskId}`)" :title="`打开 Codex 会话：${noticeText(codexReminder)}`"><span class="codex-label">{{ noticeSpeech(codexReminder) }}</span><small class="codex-project">{{ codexReminder.project }}</small><small v-if="codex.notices.length > 1">另有 {{ codex.notices.length - 1 }} 条 · 托盘查看</small></button>
+      <button class="codex-open" @click.stop="handleMenuAction(`codex:open:${codexReminder.taskId}`)" :title="`打开 Codex 会话：${noticeText(codexReminder)}`"><span class="codex-label">{{ reminderSpeech }}</span><small class="codex-project">{{ codexReminder.project }}</small><small v-if="codex.notices.length > 1">另有 {{ codex.notices.length - 1 }} 条 · 托盘查看</small></button>
       <button class="codex-dismiss" aria-label="标为已读" @click.stop="handleMenuAction(`codex:ack:${codexReminder.key}`)">×</button>
     </div>
     <div v-if="statusText && !codexReminder" class="speech-bubble" role="status">{{ statusText }}</div>
